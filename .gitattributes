@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.bin -text
+*.png -text
+*.ttf -text
+# Preserve upstream headers and notices, including their original whitespace.
+third_party/** -whitespace
