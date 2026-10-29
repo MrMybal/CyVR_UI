@@ -37,6 +37,7 @@ struct Desktop {
             renderer.destroyTarget(target);
     }
     void initialize(const fs::path &assets) {
+        model.presentation = Presentation::Immersive;
         context.createStandalone();
         renderer.initialize(VK_FORMAT_R8G8B8A8_SRGB, [&](const std::string &name) {
             std::ifstream f(assets / name, std::ios::binary);

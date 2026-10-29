@@ -21,7 +21,7 @@ Get-PinnedFile $aarUri $aarPath
 if ((Get-FileHash -LiteralPath $aarPath -Algorithm SHA256).Hash.ToLower() -ne '9a731db8a21bfc5c4be47c8862a508a2e4db3d7167062dc65683cedf7563f0cd') { throw 'OpenXR AAR checksum mismatch' }
 if (!(Test-Path -LiteralPath (Join-Path $depsRoot 'openxr'))) { Expand-Archive -LiteralPath $aarPath -DestinationPath (Join-Path $depsRoot 'openxr') }
 $vkBase = 'https://raw.githubusercontent.com/KhronosGroup/Vulkan-Headers/v1.3.290'
-foreach ($name in @('vulkan.h','vulkan_core.h','vk_platform.h','vulkan_win32.h')) {
+foreach ($name in @('vulkan.h','vulkan_core.h','vk_platform.h','vulkan_win32.h','vulkan_android.h')) {
     Get-PinnedFile "$vkBase/include/vulkan/$name" (Join-Path $projectRoot "third_party/vulkan/include/vulkan/$name")
 }
 foreach ($name in @('vulkan_video_codecs_common.h','vulkan_video_codec_h264std.h','vulkan_video_codec_h264std_decode.h','vulkan_video_codec_h264std_encode.h','vulkan_video_codec_h265std.h','vulkan_video_codec_h265std_decode.h','vulkan_video_codec_h265std_encode.h','vulkan_video_codec_av1std.h','vulkan_video_codec_av1std_decode.h')) {

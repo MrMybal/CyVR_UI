@@ -9,9 +9,12 @@ Application de référence / futures applications
                 │                         │
   cyvr_gpu : atlas + pipeline 2D + pipeline 3D
                 │
-   Android : NativeActivity → OpenXR → runtime du casque
+   Android par défaut : PanelActivity → Vulkan WSI → fenêtre 2D Horizon OS
+   Android facultatif : ImmersiveActivity → OpenXR → runtime du casque
    Windows : cible Vulkan hors écran → fenêtre Win32
 ```
+
+Le socle est une UI 2D commune. `cyvr_android` choisit son hôte à partir de l’activité : le panneau natif ne crée aucune session OpenXR. L’immersion est facultative et peut être exclue à la compilation. Voir [Android hosts and migration](ANDROID_HOSTS.md).
 
 ## Fichiers
 
@@ -21,6 +24,7 @@ Application de référence / futures applications
 | `src/ui.cpp` | Pages et style du catalogue, contrôles et cibles interactives |
 | `include/cyvr/spatial.hpp`, `src/spatial.cpp` | Matrices de vue/projection, géométrie des mains, articulations et lasers |
 | `include/cyvr/gpu.hpp`, `src/gpu.cpp` | Ressources Vulkan, atlas, synchronisation, pipelines 2D/3D et captures PC |
+| `src/android_host.cpp` | Hôte 2D Android, surface/swapchain Vulkan, cycle de vie, redimensionnement et entrée système |
 | `src/xr_app.cpp` | Session OpenXR, entrées, capacités, swapchains, placement et composition |
 | `src/android_main.cpp` | Point d’entrée NativeActivity, attachement JNI et traitement d’erreur |
 | `src/desktop.cpp` | Inspecteur Windows natif utilisant le même cœur et le même backend Vulkan |
@@ -30,7 +34,9 @@ Application de référence / futures applications
 
 ## Rendu
 
-L’interface principale est une couche quadrilatère OpenXR, avec sa propre swapchain Vulkan sRGB. Le runtime assure la présentation stéréo du panneau. La texture est réutilisée tant que le contenu ne change pas. Le panneau diagnostic et les réticules utilisent d’autres couches.
+En mode 2D, l’interface est présentée dans une surface Android native via `VK_KHR_android_surface` et `VK_KHR_swapchain`. Les commandes de fenêtre appartiennent au système. Le contenu est ajusté au ratio de la fenêtre ; les coordonnées d’entrée suivent la transformation inverse. Aucun `xrCreateInstance` ou `xrCreateSession` n’est appelé par cet hôte.
+
+En mode immersif facultatif, l’interface principale est une couche quadrilatère OpenXR, avec sa propre swapchain Vulkan sRGB. Le runtime assure la présentation stéréo du panneau. La texture est réutilisée tant que le contenu ne change pas. Le panneau diagnostic et les réticules utilisent d’autres couches.
 
 Les mains et lasers utilisent des normales lissées, un éclairage simple et une profondeur D32. Deux vues OpenXR les projettent dans une couche qui dessine également le décor natif. Leur résolution est plafonnée à 1024 pixels sur le grand côté ; les textes restent dans leur couche de panneau indépendante. Les ressources GPU sont créées au démarrage.
 

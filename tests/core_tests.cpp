@@ -72,7 +72,48 @@ int main() {
         REQUIRE(stats.percentile95() == 20);
         stats.sample(-1);
         REQUIRE(stats.count == 110);
+        UiModel panelUi;
+        REQUIRE(panelUi.presentation == Presentation::Panel2D && !panelUi.immersiveAvailable);
+        DrawList panelDraw;
+        auto hasWidget = [&](int id) {
+            return std::any_of(panelUi.widgets().begin(), panelUi.widgets().end(), [=](auto &w) { return w.id == id; });
+        };
+        panelUi.drawMain(panelDraw);
+        REQUIRE(!hasWidget(605) && !hasWidget(411) && !hasWidget(102));
+        panelUi.immersiveAvailable = true;
+        panelUi.drawMain(panelDraw);
+        REQUIRE(hasWidget(411));
+        click(panelUi, panelDraw, {945, 35});
+        REQUIRE(panelUi.immersiveRequested && !panelUi.panelRequested);
+        panelUi.presentation = Presentation::Immersive;
+        panelUi.drawMain(panelDraw);
+        click(panelUi, panelDraw, {945, 35});
+        REQUIRE(panelUi.panelRequested);
+        panelUi.presentation = Presentation::Panel2D;
+        panelUi.navigate(Page::Settings);
+        panelUi.settingsTab = 0;
+        panelUi.drawMain(panelDraw);
+        REQUIRE(hasWidget(312) && !hasWidget(310) && !hasWidget(342));
+        panelUi.settingsTab = 1;
+        panelUi.drawMain(panelDraw);
+        REQUIRE(hasWidget(360) && hasWidget(350) && !hasWidget(372));
+        panelUi.drawDock(panelDraw);
+        REQUIRE(panelDraw.vertices.empty());
+        for (Vec2 dimensions : {Vec2{1440, 990}, Vec2{1024, 704}, Vec2{720, 1280}, Vec2{2048, 800}}) {
+            auto mapping = fitCanvas(dimensions.x, dimensions.y);
+            REQUIRE(mapping.scale > 0);
+            auto surface = mapping.toSurface({945, 35});
+            auto logical = mapping.toCanvas(surface);
+            REQUIRE(near(logical.x, 945) && near(logical.y, 35));
+            REQUIRE(mapping.viewport.x >= 0 && mapping.viewport.y >= 0);
+            REQUIRE(mapping.viewport.x + mapping.viewport.w <= dimensions.x + .001f);
+            REQUIRE(mapping.viewport.y + mapping.viewport.h <= dimensions.y + .001f);
+        }
+        REQUIRE(fitCanvas(0, 0).viewport.w == 0);
+        REQUIRE(fitCanvas(100, 100, std::numeric_limits<float>::quiet_NaN()).viewport.w == 0);
+        REQUIRE(fitCanvas(std::numeric_limits<float>::infinity(), 100).viewport.w == 0);
         UiModel ui;
+        ui.presentation = Presentation::Immersive;
         REQUIRE(ui.settings.language == "en");
         REQUIRE(std::string(ui.tr("nav.home")) == "Home");
         REQUIRE(std::string(ui.pageLabel(0)) == "Home");

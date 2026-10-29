@@ -11,5 +11,5 @@ if (!$Serial) {
 }
 & $adbPath -s $Serial install -r $apkPath
 if ($LASTEXITCODE -ne 0) { throw 'Installation échouée.' }
-& $adbPath -s $Serial shell am start -a android.intent.action.MAIN -c com.oculus.intent.category.VR -n com.cyvr.ui/android.app.NativeActivity
+& $adbPath -s $Serial shell am start -a android.intent.action.MAIN -c com.oculus.intent.category.2D -n com.cyvr.ui/.PanelActivity
 if ($LASTEXITCODE -ne 0) { throw 'Lancement échoué.' }

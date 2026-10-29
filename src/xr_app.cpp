@@ -79,6 +79,8 @@ class QuestApp {
             xrDestroyActionSet(actionSet_);
         if (instance_)
             xrDestroyInstance(instance_);
+        android_->userData = nullptr;
+        android_->onAppCmd = nullptr;
     }
     void run() {
         while (!android_->destroyRequested && (!android_->window || !resumed_))
@@ -91,8 +93,15 @@ class QuestApp {
             pollEvents();
             if (running_)
                 frame();
+            if (ui_.panelRequested) {
+                returnPage = int(ui_.page);
+                saveSettings(storage_ + "/preferences.txt", ui_.settings);
+                if (running_) xrRequestExitSession(session_);
+                break;
+            }
         }
     }
+    int returnPage{-1};
 
   private:
     android_app *android_;
@@ -354,6 +363,9 @@ class QuestApp {
             ui_.refreshRates.resize(count);
             check(enumerateRates_(session_, count, &count, ui_.refreshRates.data()), "refresh rates");
         }
+        ui_.presentation = Presentation::Immersive;
+        ui_.immersiveAvailable = config_.immersiveEnabled;
+        ui_.page = Page(std::clamp(androidInitialPage(android_), 0, 3));
         if (config_.configure)
             config_.configure(ui_);
         ui_.drawMain(mainDraw_);
@@ -1090,10 +1102,13 @@ class QuestApp {
     }
 };
 } // namespace
-void runCyVR(android_app *android) {
-    cyvr::runAndroidApp(android, {});
-}
-void cyvr::runAndroidApp(android_app *android, const AndroidAppConfig &config) {
-    QuestApp app(android, config);
-    app.run();
+void cyvr::runImmersiveAndroidApp(android_app *android, const AndroidAppConfig &config) {
+    int page;
+    {
+        QuestApp app(android, config);
+        app.run();
+        page = app.returnPage;
+    }
+    // Release the XR session and GPU before asking Horizon OS to restore a panel.
+    if (page >= 0) androidSwitchPresentation(android, Presentation::Panel2D, page);
 }

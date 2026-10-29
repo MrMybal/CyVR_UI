@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #define VK_NO_PROTOTYPES
+#if defined(__ANDROID__) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
+#define VK_USE_PLATFORM_ANDROID_KHR
+#endif
 #include "cyvr/core.hpp"
 #include "cyvr/spatial.hpp"
 #include <functional>
@@ -57,7 +60,8 @@ class VulkanRenderer {
     Target createTarget(uint32_t width, uint32_t height, VkImage external = VK_NULL_HANDLE,
                         bool depth = false);
     void destroyTarget(Target &target);
-    void draw(const Target &target, const DrawList &commands, const EnvironmentView *glass = nullptr);
+    void draw(const Target &target, const DrawList &commands, const EnvironmentView *glass = nullptr,
+              bool present=false);
     void drawSpatial(const Target &target, const SpatialMesh &mesh, const Mat4 &matrix,
                      const EnvironmentView *environment = nullptr);
     std::vector<uint8_t> readback(const Target &target);

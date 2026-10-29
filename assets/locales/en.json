@@ -145,5 +145,14 @@
   "status.desktop": "Native Vulkan / desktop mode",
   "status.waiting": "Waiting for the headset",
   "status.active": "Session active / pointer and trigger",
-  "language.label": "LANGUAGE"
+  "language.label": "LANGUAGE",
+  "mode.panel": "2D window",
+  "mode.immersive": "Immersive",
+  "status.panel": "Native 2D window / System input",
+  "panel.accessibility": "Accessibility",
+  "panel.balance_help": "Choose your theme, contrast and interface materials.",
+  "panel.window_help": "Move, resize and close with the Quest window controls.",
+  "panel.input_help": "Use the system pointer or touch to select and drag controls.",
+  "panel.decor": "APP BACKDROP",
+  "panel.material_help": "Materials affect the app backdrop, inside this window."
 }

@@ -52,6 +52,17 @@ struct Rect {
     float x{}, y{}, w{}, h{};
     bool contains(Vec2 p) const { return p.x >= x && p.y >= y && p.x < x + w && p.y < y + h; }
 };
+struct CanvasMapping {
+    Rect viewport;
+    float scale{1};
+    Vec2 toCanvas(Vec2 point) const {
+        return {(point.x-viewport.x)/scale,(point.y-viewport.y)/scale};
+    }
+    Vec2 toSurface(Vec2 point) const {
+        return {viewport.x+point.x*scale,viewport.y+point.y*scale};
+    }
+};
+CanvasMapping fitCanvas(float width, float height, float canvasWidth = 1440, float canvasHeight = 990);
 struct PanelGeometry {
     Pose pose{{0, 1.45f, -1.35f}, {}};
     float width{1.2f}, height{0.825f};
@@ -91,6 +102,7 @@ enum class Background { Studio, Night, Passthrough };
 enum class HandModel { Automatic, Studio, Skeleton, Hidden };
 enum class FollowMode { World, FaceViewer, FollowView };
 enum class WindowState { Open, Minimized, Closed };
+enum class Presentation { Panel2D, Immersive };
 struct Settings {
     std::string language{"en"};
     float distance{1.35f}, scale{1};
@@ -146,6 +158,8 @@ class UiModel {
     void clearApplicationWidgets() { widgets_.clear(); }
     const std::string &toast() const { return toast_; }
     Settings settings;
+    Presentation presentation{Presentation::Panel2D};
+    bool immersiveAvailable{}, immersiveRequested{}, panelRequested{};
     FrameStats stats;
     Page page{Page::Home};
     bool debugVisible{}, recenterRequested{true}, exportRequested{}, exitRequested{}, saveRequested{};

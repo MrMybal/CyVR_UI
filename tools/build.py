@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import zipfile
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = dict(os.environ)
@@ -60,11 +61,35 @@ def windows(tests_only=False):
         notices(output / "licenses")
         print("Native reference:", output / "CyVR_UI.exe")
 
-def android():
-    directory = ROOT / "build/android"
-    configure(directory, f"-DCMAKE_TOOLCHAIN_FILE={NDK / 'build/cmake/android.toolchain.cmake'}", "-DANDROID_ABI=arm64-v8a", "-DANDROID_PLATFORM=android-32", "-DANDROID_STL=c++_static", "-DCYVR_BUILD_TESTS=OFF")
+def android(immersive=True):
+    directory = ROOT / ("build/android" if immersive else "build/android-panel")
+    configure(directory, f"-DCMAKE_TOOLCHAIN_FILE={NDK / 'build/cmake/android.toolchain.cmake'}", "-DANDROID_ABI=arm64-v8a", "-DANDROID_PLATFORM=android-32", "-DANDROID_STL=c++_static", "-DCYVR_BUILD_TESTS=OFF", f"-DCYVR_ENABLE_IMMERSIVE={'ON' if immersive else 'OFF'}")
     notices(directory / "assets/licenses")
-    manifest = ROOT / "android/app/src/main/AndroidManifest.xml"
+    source_manifest = ROOT / "android/app/src/main/AndroidManifest.xml"
+    manifest = source_manifest
+    if not immersive:
+        ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+        tree = ET.parse(source_manifest)
+        document = tree.getroot()
+        ns = "{http://schemas.android.com/apk/res/android}"
+        application = document.find("application")
+        for activity in list(application.findall("activity")):
+            if activity.get(ns + "name") == ".ImmersiveActivity":
+                application.remove(activity)
+        for node in list(document):
+            if (node.tag == "queries") or (node.tag == "uses-permission" and node.get(ns+"name") == "com.oculus.permission.HAND_TRACKING") or (node.tag == "uses-feature" and node.get(ns+"name") in ("oculus.software.handtracking", "com.oculus.feature.PASSTHROUGH")):
+                document.remove(node)
+        manifest = directory / "AndroidManifest.xml"
+        tree.write(manifest, encoding="utf-8", xml_declaration=True)
+    classes = directory / "classes"
+    classes.mkdir(exist_ok=True)
+    sources = list((ROOT / "android/app/src/main/java").rglob("*.java"))
+    if not immersive:
+        sources = [s for s in sources if s.name != "ImmersiveActivity.java"]
+    run(JAVA / "javac.exe", "-encoding", "UTF-8", "-Xlint:-options", "-source", "8", "-target", "8", "-bootclasspath", SDK / "platforms/android-34/android.jar", "-d", classes, *sources)
+    dex = directory / "dex"
+    dex.mkdir(exist_ok=True)
+    run(BUILD_TOOLS / "d8.bat", "--release", "--min-api", "32", "--lib", SDK / "platforms/android-34/android.jar", "--output", dex, *classes.rglob("*.class"))
     run(BUILD_TOOLS / "aapt2.exe", "compile", "--dir", ROOT / "android/app/src/main/res", "-o", directory / "resources.zip")
     resources = directory / "resources.apk"
     unsigned = directory / "unsigned.apk"
@@ -74,7 +99,9 @@ def android():
         for entry in source.infolist():
             apk.writestr(entry.filename, source.read(entry.filename), compress_type=entry.compress_type)
         apk.write(directory / "libcyvr.so", "lib/arm64-v8a/libcyvr.so")
-        apk.write(ROOT / ".deps/openxr/prefab/modules/openxr_loader/libs/android.arm64-v8a/libopenxr_loader.so", "lib/arm64-v8a/libopenxr_loader.so")
+        apk.write(dex / "classes.dex", "classes.dex")
+        if immersive:
+            apk.write(ROOT / ".deps/openxr/prefab/modules/openxr_loader/libs/android.arm64-v8a/libopenxr_loader.so", "lib/arm64-v8a/libopenxr_loader.so")
     aligned = directory / "aligned.apk"
     run(BUILD_TOOLS / "zipalign.exe", "-P", "16", "-f", "4", unsigned, aligned)
     cache = ROOT / ".cache"
@@ -83,7 +110,7 @@ def android():
     if not key.exists():
         # Conventional public development credentials. This key must never sign a store release.
         run(JAVA / "keytool.exe", "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android", "-alias", "androiddebugkey", "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-dname", "CN=CyVR Development,O=CyVR,C=FR")
-    output = ROOT / "dist/android/CyVR_UI-debug.apk"
+    output = ROOT / ("dist/android/CyVR_UI-debug.apk" if immersive else "dist/android/CyVR_UI-panel-debug.apk")
     output.parent.mkdir(parents=True, exist_ok=True)
     signer = BUILD_TOOLS / "lib/apksigner.jar"
     run(JAVA / "java.exe", "-jar", signer, "sign", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true", "--ks", key, "--ks-pass", "pass:android", "--key-pass", "pass:android", "--out", output, aligned)
@@ -94,10 +121,12 @@ def android():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", choices=["all", "windows", "android", "tests"], default="all")
+    parser.add_argument("--no-immersive", action="store_true", help="Build a native 2D APK without OpenXR")
     args = parser.parse_args()
     run("python",ROOT/"tools/generate_locales.py")
-    ensure_dependencies()
+    if not args.no_immersive:
+        ensure_dependencies()
     if args.target in ("all", "windows", "tests"):
         windows(args.target == "tests")
     if args.target in ("all", "android"):
-        android()
+        android(not args.no_immersive)

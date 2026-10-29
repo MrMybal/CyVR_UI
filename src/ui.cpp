@@ -131,11 +131,20 @@ void UiModel::drawMain(DrawList &d) {
     d.text(175, 27, 19, workspaceLabel, muted);
     d.rect({1093, 35, 7, 7}, mint, 3);
     d.text(1114, 24, 20, contextLabel.empty() ? tr("header.personal") : contextLabel, muted);
-    d.rect({566, 8, 444, 61}, hover_ == 605 ? hoverColor : surface, 12);
-    windowIcon(d, 0, 788, 38, mint);
-    if (hover_ == 605)
-        d.text(625, 48, 16, tr("dock.move_window"), white);
-    addWidget(605, {566, 8, 444, 61}, Control::Drag);
+    const bool immersive = presentation == Presentation::Immersive;
+    if (immersive) {
+        d.rect({566, 8, 296, 61}, hover_ == 605 ? hoverColor : surface, 12);
+        windowIcon(d, 0, 714, 38, mint);
+        if (hover_ == 605) d.text(620, 48, 16, tr("dock.move_window"), white);
+        addWidget(605, {566, 8, 296, 61}, Control::Drag);
+    }
+    if (immersiveAvailable) {
+        Rect mode{880, 8, 130, 61};
+        d.rect(mode, hover_ == 411 ? hoverColor : surface, 12);
+        windowIcon(d, immersive ? 6 : 3, 945, 34, mint);
+        if (hover_ == 411) d.text(887, 54, 12, tr(immersive ? "mode.panel" : "mode.immersive"), white);
+        addWidget(411, mode);
+    }
     d.line({0, 78}, {1440, 78}, lineColor, 1);
     d.line({222, 78}, {222, 920}, lineColor, 1);
     label(d, 28, 114, tr("header.space"));
@@ -171,8 +180,8 @@ void UiModel::drawMain(DrawList &d) {
     d.line({28, 685}, {193, 685}, lineColor, 1);
     d.text(29, 713, 21, sidebarTitle.empty() ? tr("brand.custom") : sidebarTitle, white);
     d.text(29, 751, 18, sidebarSubtitle.empty() ? tr("brand.open") : sidebarSubtitle, muted);
-    label(d, 29, 815, "C++ / OPENXR");
-    label(d, 29, 848, "VULKAN / 0.3");
+    label(d, 29, 815, immersive ? "C++ / OPENXR" : "C++ / ANDROID");
+    label(d, 29, 848, "VULKAN / 0.4");
     const float x = 266, right = 1394, width = right - x;
     if (renderContent && renderContent(d)) {
         // Application owns only the content region; chrome, modal and comfort remain shared.
@@ -202,9 +211,9 @@ void UiModel::drawMain(DrawList &d) {
         frame(d, {x, 681, width, 138}, surface, 16);
         icon(d, 2, x + 28, 713, mint);
         d.text(x + 85, 701, 30, tr("home.balance"), white);
-        d.text(x + 85, 751, 23, tr("home.balance_help"), sub);
+        d.text(x + 85, 751, 23, tr(immersive ? "home.balance_help" : "panel.balance_help"), sub);
         button(101, {1122, 721, 244, 62}, tr("home.personalize"));
-        d.text(x, 851, 20, tr("home.dock_help"), muted);
+        d.text(x, 851, 20, tr(immersive ? "home.dock_help" : "panel.window_help"), muted);
     } else if (page == Page::Components) {
         label(d, x, 118, tr("components.eyebrow"));
         d.text(x, 154, 47, tr("components.title"), white);
@@ -248,9 +257,10 @@ void UiModel::drawMain(DrawList &d) {
     } else if (page == Page::Settings) {
         label(d, x, 118, tr("settings.eyebrow"));
         d.text(x, 154, 48, tr("settings.title"), white);
-        for (int i = 0; i < 3; i++)
+        if (!immersive && settingsTab == 2) settingsTab = 1;
+        for (int i = 0; i < (immersive ? 3 : 2); i++)
             button(340 + i, {x + i * 378, 229, 366, 58},
-                   i == 0   ? tr("settings.placement")
+                   i == 0   ? tr(immersive ? "settings.placement" : "panel.accessibility")
                    : i == 1 ? tr("settings.appearance")
                             : tr("settings.hands"),
                    settingsTab == i);
@@ -265,7 +275,15 @@ void UiModel::drawMain(DrawList &d) {
             d.rect({x + 14 + (width - 54) * fraction, y + 81, 27, 27}, white, 14);
             addWidget(id, {x + 27, y + 67, width - 54, 47}, Control::Slider);
         };
-        if (settingsTab == 0) {
+        if (!immersive && settingsTab == 0) {
+            frame(d, {x, 314, width, 170}, surface, 16);
+            d.text(x + 25, 342, 30, tr("mode.panel"), white);
+            d.text(x + 25, 399, 23, tr("panel.window_help"), sub);
+            button(312, {x, 531, 550, 64}, tr("settings.contrast"), settings.highContrast);
+            button(313, {844, 531, 550, 64}, tr("settings.motion"), settings.reducedMotion);
+            d.text(x, 655, 23, tr("panel.input_help"), sub);
+            button(330, {1024, 810, 370, 60}, tr("settings.restore"));
+        } else if (settingsTab == 0) {
             slider(310, 309, tr("settings.distance"), settings.distance - 1,
                    number(settings.distance, 2) + " m", tr("settings.distance_help"));
             slider(311, 437, tr("settings.scale"), (settings.scale - .85f) / .4f,
@@ -305,18 +323,20 @@ void UiModel::drawMain(DrawList &d) {
                        : i == 1 ? tr("appearance.light")
                                 : tr("appearance.ocean"),
                        int(settings.theme) == i);
-            label(d, x, 422, tr("appearance.environment"));
-            for (int i = 0; i < 3; i++)
+            label(d, x, 422, tr(immersive ? "appearance.environment" : "panel.decor"));
+            for (int i = 0; i < (immersive ? 3 : 2); i++)
                 button(370 + i, {x + i * 378, 455, 366, 58},
                        i == 0   ? tr("appearance.studio")
                        : i == 1 ? tr("appearance.night")
                                 : tr("appearance.passthrough"),
-                       int(settings.background) == i, i != 2 || passthroughAvailable);
+                       (immersive ? int(settings.background) : (settings.background == Background::Night ? 1 : 0)) == i,
+                       i != 2 || passthroughAvailable);
             slider(350, 531, tr("appearance.opacity"), (settings.opacity - .25f) / .75f,
                    number(settings.opacity * 100, 0) + " %",
-                   settings.highContrast ? tr("appearance.opaque_help") : tr("appearance.opacity_help"));
+                   settings.highContrast ? tr("appearance.opaque_help") : tr(immersive ? "appearance.opacity_help" : "panel.material_help"));
             slider(351, 659, tr("appearance.blur"), settings.blur, number(settings.blur * 100, 0) + " %",
-                   settings.background == Background::Passthrough ? tr("appearance.passthrough_blur_help")
+                   !immersive ? tr("panel.material_help")
+                   : settings.background == Background::Passthrough ? tr("appearance.passthrough_blur_help")
                                                                   : tr("appearance.blur_help"));
             slider(352, 787, tr("appearance.brightness"), (settings.brightness - .15f) / .85f,
                    number(settings.brightness * 100, 0) + " %", tr("appearance.brightness_help"));
@@ -373,7 +393,7 @@ void UiModel::drawMain(DrawList &d) {
     d.line({1, 920}, {1439, 920}, lineColor, 1);
     d.rect({29, 951, 7, 7}, mint, 3);
     d.text(49, 938, 20, statusText(), sub);
-    button(102, {962, 927, 227, 59}, tr("common.recenter"));
+    if (immersive) button(102, {962, 927, 227, 59}, tr("common.recenter"));
     button(103, {1204, 927, 208, 59}, debugVisible ? tr("common.hud_active") : tr("common.hud"));
     if (!toast_.empty()) {
         frame(d, {370, 844, 970, 65}, settings.theme == Theme::Light ? selectedColor : Color::hex(0x38564b),
@@ -422,6 +442,7 @@ void UiModel::drawDebug(DrawList &d) {
 void UiModel::drawDock(DrawList &d) {
     palette(settings);
     d.clear();
+    if (presentation != Presentation::Immersive) return;
     widgets_.erase(std::remove_if(widgets_.begin(), widgets_.end(),
                                   [](auto &w) { return w.id >= 600 && w.id < 700 && w.id != 605; }),
                    widgets_.end());

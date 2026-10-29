@@ -6,6 +6,15 @@
 #include <sstream>
 
 namespace cyvr {
+CanvasMapping fitCanvas(float width, float height, float canvasWidth, float canvasHeight) {
+    if (!std::isfinite(width) || !std::isfinite(height) || !std::isfinite(canvasWidth) ||
+        !std::isfinite(canvasHeight) || width <= 0 || height <= 0 || canvasWidth <= 0 || canvasHeight <= 0)
+        return {{}, 1};
+    float scale = std::min(width / canvasWidth, height / canvasHeight);
+    return {{(width - canvasWidth * scale) * .5f, (height - canvasHeight * scale) * .5f, canvasWidth * scale,
+             canvasHeight * scale},
+            scale};
+}
 Hit intersectPanel(Vec3 origin, Vec3 direction, const PanelGeometry &p, bool clip) {
     direction = normalized(direction);
     Vec3 normal = rotate(p.pose.orientation, {0, 0, 1});
@@ -364,6 +373,12 @@ void UiModel::action(int id) {
         return;
     }
     switch (id) {
+    case 411:
+        if (presentation == Presentation::Immersive)
+            panelRequested = true;
+        else if (immersiveAvailable)
+            immersiveRequested = true;
+        break;
     case 410: {
         const auto *current = &resolveLocale(settings.language);
         size_t next = (size_t(current - availableLocales()) + 1) % localeCount();

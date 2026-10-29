@@ -571,7 +571,7 @@ void VulkanRenderer::destroyTarget(Target &t) {
     }
     t = {};
 }
-void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentView *glass) {
+void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentView *glass, bool present) {
     if (d.vertices.size() > maxVertices)
         throw std::runtime_error("UI vertex budget exceeded");
     std::memcpy(vertices_, d.vertices.data(), d.vertices.size() * sizeof(Vertex));
@@ -634,6 +634,17 @@ void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentV
     vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(size), size);
     vkCmdDraw(command_, lastVertexCount, 1, 0, 0);
     vkCmdEndRenderPass(command_);
+    if (present) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = t.image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
     submit();
 }
 std::vector<uint8_t> VulkanRenderer::readback(const Target &t) {

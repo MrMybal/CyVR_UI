@@ -145,5 +145,14 @@
   "status.desktop": "Vulkan natif / mode bureau",
   "status.waiting": "Session en attente du casque",
   "status.active": "Session active / rayon et gâchette",
-  "language.label": "LANGUE"
+  "language.label": "LANGUE",
+  "mode.panel": "Fenêtre 2D",
+  "mode.immersive": "Immersif",
+  "status.panel": "Fenêtre 2D native / Entrée système",
+  "panel.accessibility": "Accessibilité",
+  "panel.balance_help": "Choisissez le thème, le contraste et les matériaux.",
+  "panel.window_help": "Déplacez, redimensionnez et fermez avec les commandes Quest.",
+  "panel.input_help": "Utilisez le pointeur système ou le toucher pour les contrôles.",
+  "panel.decor": "DÉCOR DE L’APP",
+  "panel.material_help": "Les matériaux agissent sur le décor interne de cette fenêtre."
 }

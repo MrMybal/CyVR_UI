@@ -1,19 +1,25 @@
 # CyVR UI
 
-A native, open-source interface foundation for spatial applications on **Meta Quest 2, Quest 3S, Quest 3 and Quest Pro**. Built with **C++17, OpenXR and Vulkan**, with a custom UI renderer and no game engine or web runtime.
+A native, open-source **2D interface foundation** for applications on **Meta Quest 2, Quest 3S, Quest 3 and Quest Pro**, with an optional immersive host. Built with **C++17 and Vulkan**, plus **OpenXR only for immersion**, with a custom UI renderer and no game engine or web runtime.
 
-CyVR UI includes reusable C++ libraries, a standalone Quest reference app, and a native Windows inspector. Version **0.3.0** provides an English-first interface with French translation, themes, translucent materials, hand models and window controls. Quest 3 has been tested; the other declared devices still need physical validation.
+Version **0.4.0** starts in a resizable native Android 2D window managed by Horizon OS. This lets ordinary apps share the Quest workspace. Apps that need a full 3D experience can opt into the immersive activity; both hosts reuse the same UI components, themes, translations and preferences. A 2D-only build excludes OpenXR entirely. Hybrid transitions require Horizon OS v69 or later.
 
-![CyVR UI reference interface](docs/images/interface.png)
+The project includes reusable C++ libraries, a standalone Quest reference app and a Windows inspector. The previous immersive implementation has been exercised on Quest 3; see [Validation](docs/VALIDATION.md) for the status of the new 2D host and other devices.
+
+![Shared interface shown in the Windows immersive-layout inspector](docs/images/interface.png)
+
+The image shows the shared catalogue in the Windows inspector. Native 2D mode uses the Quest system window controls instead of the floating immersive bar.
 
 ## Features
 
 - A component catalogue: buttons, toggles, sliders with pointer capture, segmented controls, badges, toasts and modal dialogs.
-- A floating icon bar for moving, minimizing, closing, restoring and changing window placement. Action names appear on hover.
-- World anchoring, viewer-facing orientation and smooth view following. Following pauses during interaction.
+- Native 2D windows with system pointer/touch input and Quest window management; no OpenXR session in the panel host.
+- Optional immersive mode, selected explicitly through a headset icon; its overlapping-window icon returns to 2D.
+- In immersive mode, a floating icon bar for moving, minimizing, closing, restoring and changing window placement. Action names appear on hover.
+- In immersive mode, world anchoring, viewer-facing orientation and smooth view following. Following pauses during interaction.
 - Graphite, Light and Ocean themes; surface opacity; frosted glass over the native environment; Studio and Night backgrounds.
-- Optional headset passthrough. Its camera image is not exposed to the application or blurred by the UI renderer.
-- Smooth tracked-hand meshes when available; an original Studio glove for controllers; skeleton and hidden-hand modes; optional laser pointers.
+- Optional immersive headset passthrough. Its camera image is not exposed to the application or blurred by the UI renderer.
+- In immersive mode, smooth tracked-hand meshes when available; an original Studio glove for controllers; skeleton and hidden-hand modes; optional laser pointers.
 - An independent diagnostics HUD, local preferences and JSON export.
 - English by default, French included, and UTF-8 translation catalogues separated from rendering code.
 
@@ -34,13 +40,14 @@ Set `ANDROID_HOME` and `JAVA_HOME` when using installations outside the default 
 ```powershell
 .\build.ps1                 # Windows inspector, C++ tests and Quest APK
 .\build.ps1 -Target windows # Windows inspector and tests
-.\build.ps1 -Target android # ARM64 Quest APK
+.\build.ps1 -Target android # ARM64 Quest APK: 2D by default, optional immersion
+.\build.ps1 -Target android -NoImmersive # Native 2D APK, no OpenXR library
 .\build.ps1 -Target tests   # Portable core tests
 ```
 
-The first build downloads the official Khronos OpenXR loader AAR and verifies its pinned SHA-256. Headers, fonts, generated translation data and model assets are included in the repository. No proprietary Meta SDK is embedded. APK packaging uses CMake/NDK, aapt2, zipalign and apksigner; Gradle is not required.
+The first build downloads the official Khronos OpenXR loader AAR and verifies its pinned SHA-256. Headers, fonts, generated translation data and model assets are included in the repository. No proprietary Meta SDK is embedded. APK packaging uses CMake/NDK, javac, d8, aapt2, zipalign and apksigner; Gradle is not required. A small Java NativeActivity bridge handles activity transitions; the UI and rendering remain C++. The 2D-only build does not download or package the OpenXR loader.
 
-- **Quest:** install `dist/android/CyVR_UI-debug.apk`, then open **CyVR UI** under **Unknown Sources**.
+- **Quest:** install `dist/android/CyVR_UI-debug.apk`, then open **CyVR UI** under **Unknown Sources**. It opens in a **2D window**. The 2D-only APK is `dist/android/CyVR_UI-panel-debug.apk` (same package, alternative build).
 - **Windows:** run `dist/windows/CyVR_UI.exe` with its `assets` folder alongside it. A Vulkan graphics driver is required.
 
 For a connected development headset:
@@ -55,7 +62,11 @@ The APK uses a local development signing key. A production distribution needs it
 
 ## Controls
 
-| Action | Controllers | Tracked hands |
+**Native 2D:** use the Quest system pointer, hand pinch or touch to activate controls. Drag sliders through the same shared input-capture code. Move, resize, minimize and close the window with Horizon OS controls. Settings show appearance and accessibility controls; hand meshes, 3D distance and world anchoring belong to the immersive host.
+
+**Optional immersion:** select the headset icon in the header. The app closes its 2D activity and starts OpenXR. Select the overlapping-window icon to return to the Home workspace as a 2D panel. The current page and saved appearance/language preferences carry across. Entering immersion takes the active immersive slot; ordinary 2D windows remain managed by Horizon OS.
+
+| Immersive action | Controllers | Tracked hands |
 |---|---|---|
 | Point | Aim a controller; the pointer and reticle indicate the target | Aim the hand pointer |
 | Select | Press and release the trigger | Pinch and release thumb and index |
@@ -94,13 +105,15 @@ The build script regenerates the table automatically; the language selector disc
 
 `cyvr_ui` provides drawing primitives, geometry, input capture, settings, translations and statistics. `cyvr_gpu` provides the Vulkan renderer. The reference pages live in `src/ui.cpp`; interaction logic is in `src/core.cpp`.
 
-Applications can replace the reference pages with `UiModel::renderApplication` and `handleApplicationAction`, and register controls through `applicationWidget()`. On Android, `AndroidAppConfig` and `runAndroidApp()` allow an application to configure its own name and UI while reusing the OpenXR host. Keep business logic above the renderer. See [Architecture](docs/ARCHITECTURE.md).
+Applications can replace the reference pages with `UiModel::renderApplication` and `handleApplicationAction`, and register controls through `applicationWidget()`. On Android, `AndroidAppConfig` and `runAndroidApp()` allow an application to configure its own name and UI while reusing the native 2D host by default. Link `cyvr_android`; set `AndroidAppConfig::immersiveEnabled` only for apps that expose immersion, and build with `CYVR_ENABLE_IMMERSIVE=OFF` for strictly 2D apps. Keep business state above activity lifetimes. See [Android hosts and migration](docs/ANDROID_HOSTS.md) and [Architecture](docs/ARCHITECTURE.md).
 
 Hand models can be supplied through `HandSurface` or `HandSkin`. The included controller glove is generated by `tools/bake_hands.py` and is covered by the project MIT license. Importing an alternative model currently requires changing the code or assets; the headset app does not contain a model-file picker.
 
 ## Rendering and diagnostics
 
-UI text and controls use cached OpenXR quad layers. Frosted glass samples the native procedural environment through a 480 × 330 intermediate target. The backdrop viewpoint is updated at up to 30 Hz while it moves, in addition to content updates. Text remains sharp. Hands and the environment use per-eye rendering with depth, capped at 1024 pixels on the longest side. The Quest path does not read images back to the CPU.
+The 2D host presents directly to an Android Vulkan swapchain, redraws on UI changes, fits the logical canvas to resized windows and maps system coordinates back into the shared input model. It stops GPU work while paused and does no CPU image readback. Idle UI does not submit repeated frames; UI timers are serviced at up to 30 Hz. Panel diagnostics leave display cadence unmeasured rather than treating idle redraw intervals as headset FPS.
+
+The optional immersive host draws UI text and controls into cached OpenXR quad layers. Frosted glass samples the native procedural environment through a 480 × 330 intermediate target. The backdrop viewpoint is updated at up to 30 Hz while it moves, in addition to content updates. Text remains sharp. Hands and the environment use per-eye rendering with depth, capped at 1024 pixels on the longest side. The Quest path does not read images back to the CPU.
 
 The HUD reports application cadence, P95 frame intervals, work time excluding `xrWaitFrame`, display refresh rate and RSS memory. **GPU time is not instrumented.** Work time includes explicit driver waits and is not a CPU-utilization metric. Requested 72/90/120 Hz modes are offered only when reported by the runtime; they are not performance guarantees.
 
@@ -108,7 +121,9 @@ Diagnostics are exported locally to `/sdcard/Android/data/com.cyvr.ui/files/diag
 
 ## Current limits
 
-Windows are flat. Depth testing applies within the 3D layer; UI layers are composed above the hands without cross-layer depth occlusion. Blur covers the native environment, not hands or passthrough. Free window rotation, two-hand resizing, curved panels, editable text fields, a virtual keyboard and eye tracking are not implemented.
+The shared layout currently fits a 1440 × 990 logical canvas while preserving aspect ratio; it letterboxes rather than reflowing at narrow window sizes. In 2D, opacity and blur affect only the app-owned backdrop, not other apps or the system environment.
+
+Immersive windows are flat. Depth testing applies within the 3D layer; UI layers are composed above the hands without cross-layer depth occlusion. Blur covers the native environment, not hands or passthrough. Free window rotation, two-hand resizing, curved panels, editable text fields, a virtual keyboard and eye tracking are not implemented.
 
 ## Asset tools
 
