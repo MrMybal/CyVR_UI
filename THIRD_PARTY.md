@@ -2,6 +2,8 @@
 
 Le code CyVR original est sous licence MIT (`LICENSE`). Les composants tiers conservent leurs licences.
 
+Les logos conservés dans `assets/branding/` sont exclus de la licence MIT du projet et ne sont pas inclus dans le dépôt ni dans les archives de distribution.
+
 | Composant | Version/source | Licence | Utilisation |
 |---|---|---|---|
 | OpenXR headers et loader Khronos | SDK 1.1.49, dépôt `KhronosGroup/OpenXR-SDK`, AAR Maven `org.khronos.openxr:openxr_loader_for_android:1.1.49` | Apache-2.0 ; certains fichiers proposent aussi MIT | API et chargement du runtime système |

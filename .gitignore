@@ -2,6 +2,7 @@
 .cache/
 build/
 dist/
+assets/branding/
 android/.gradle/
 android/.cxx/
 android/app/build/

@@ -7,15 +7,16 @@ dist = root / "dist"
 dist.mkdir(exist_ok=True)
 with zipfile.ZipFile(dist / "CyVR_UI-Windows.zip", "w", zipfile.ZIP_DEFLATED) as out:
     for path in sorted((dist / "windows").rglob("*")):
-        if path.is_file() and path.name not in {"preferences.txt", "diagnostic.json"}:
-            out.write(path, path.relative_to(dist / "windows"))
+        relative = path.relative_to(dist / "windows")
+        if path.is_file() and relative.parts[:2] != ("assets", "branding") and path.name not in {"preferences.txt", "diagnostic.json"}:
+            out.write(path, relative)
 
 files = {"CMakeLists.txt", "README.md", "LICENSE", "THIRD_PARTY.md", "build.ps1", ".gitignore", ".gitattributes", ".clang-format"}
 folders = {"include", "src", "shaders", "assets", "android", "tests", "tools", "docs", "third_party"}
 with zipfile.ZipFile(dist / "CyVR_UI-Source.zip", "w", zipfile.ZIP_DEFLATED) as out:
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
-        if not path.is_file() or any(part in {".cache", ".deps", ".git", "build", "dist", "__pycache__"} for part in relative.parts):
+        if not path.is_file() or relative.parts[:2] == ("assets", "branding") or any(part in {".cache", ".deps", ".git", "build", "dist", "__pycache__"} for part in relative.parts):
             continue
         if relative.parts[0] in folders or str(relative) in files:
             out.write(path, relative)

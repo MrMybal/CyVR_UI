@@ -140,4 +140,4 @@ python tools/bake_hands.py
 
 ## License
 
-Original CyVR code, icons and glove geometry are licensed under [MIT](LICENSE). The application may be used in open-source and commercial projects under the applicable licenses. Third-party components retain their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md). The Quest operating system, system OpenXR runtime and graphics drivers are provided by the device platform.
+Original CyVR code, UI control icons and glove geometry are licensed under [MIT](LICENSE). The application may be used in open-source and commercial projects under the applicable licenses. The logo artwork in `assets/branding/` is excluded from this MIT grant and is not included in the repository or distribution archives. Third-party components retain their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md). The Quest operating system, system OpenXR runtime and graphics drivers are provided by the device platform.
