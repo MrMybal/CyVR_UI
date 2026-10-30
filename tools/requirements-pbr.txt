@@ -1,0 +1,2 @@
+# Authoring only; not embedded in the application.
+numpy==2.4.0

@@ -13,6 +13,7 @@
 namespace cyvr {
 constexpr float pi = 3.14159265358979323846f;
 constexpr int dockWidth = 480, dockHeight = 90, dockOriginX = (1440 - dockWidth) / 2, dockOriginY = 1014;
+constexpr bool isDockWidget(int id) { return id >= 600 && id < 700 && id != 605; }
 struct Vec2 {
     float x{}, y{};
 };
@@ -91,14 +92,24 @@ struct DrawList {
     DrawList() { vertices.reserve(48000); }
     void clear() { vertices.clear(); }
     void triangle(Vec2 a, Vec2 b, Vec2 c, Color color);
+    // Rounded corners, circles and strokes are anti-aliased by ui.frag at any target resolution.
     void rect(Rect rect, Color color, float radius = 0);
+    void border(Rect rect, Color color, float radius = 0, float width = 1);
+    void circle(Vec2 center, float radius, Color color);
+    void ring(Vec2 center, float radius, float width, Color color);
     void line(Vec2 from, Vec2 to, Color color, float width = 2);
+    // Round caps and joins. Joints overlap, so use an opaque color.
+    void polyline(const Vec2 *points, size_t count, Color color, float width = 2, bool closed = false);
     void text(float x, float y, float size, std::string_view value, Color color);
     void image(Rect rect, Rect uv, Color tint = {1, 1, 1, 1}, float radius = 0);
+    // Separate borrowed video surface; application image atlases stay available.
+    void video(Rect rect, Rect uv);
+    void overlay(Rect rect, Rect uv = {0,0,1,1});
     float textWidth(float size, std::string_view value) const;
 };
 enum class Theme { Graphite, Light, Ocean };
-enum class Background { Studio, Night, Passthrough };
+// Original saved preference values remain stable.
+enum class Background { Studio, Night, Passthrough, Lounge, Observatory, Terrace, Black, Dark };
 enum class HandModel { Automatic, Studio, Skeleton, Hidden };
 enum class FollowMode { World, FaceViewer, FollowView };
 enum class WindowState { Open, Minimized, Closed };
@@ -110,9 +121,11 @@ struct Settings {
     float requestedHz{72};
     Theme theme{Theme::Graphite};
     Background background{Background::Studio};
+    Background virtualBackground{Background::Studio}; // Restored when leaving optional AR.
     HandModel handModel{HandModel::Automatic};
     FollowMode follow{FollowMode::World};
     float opacity{.9f}, blur{.5f}, brightness{.65f}, handScale{1}, handPitch{};
+    float environmentDim{1}; // Linear environment-only dimmer; video layers are independent.
     bool rays{true};
     void sanitize();
 };
@@ -126,6 +139,7 @@ struct FrameStats {
 };
 enum class Page { Home, Components, Settings, Diagnostics };
 enum class Control { Button, Slider, Drag };
+enum class SliderPhase { Begin, Preview, Commit, Cancel };
 struct Widget {
     int id;
     Rect rect;
@@ -142,12 +156,18 @@ class UiModel {
     // Optional application layer. Returning false preserves the reference catalogue.
     std::function<bool(DrawList &)> renderApplication;
     std::function<bool(DrawList &)> renderApplicationDock;
+    std::function<bool(DrawList &)> renderApplicationDebug;
     std::function<bool(int)> handleApplicationAction;
+    // Captured slider gestures: preview while dragging, commit once on release.
+    std::function<bool(int, float, SliderPhase)> handleApplicationSlider;
+    // Return true to consume selection for an application controller gesture.
+    std::function<bool(int, Vec2, float, float, Pose, bool)> applicationController;
     // Runs after shared chrome and before catalogue content. Settings can keep the stock page.
     std::function<bool(DrawList &)> renderContent;
     std::function<void(double)> applicationTick;
+    std::function<bool()> applicationBack;
     std::array<std::string, 4> pageLabels{};
-    std::string workspaceLabel{"WORKSPACE"}, contextLabel;
+    std::string workspaceLabel, contextLabel; // Empty labels use the translated defaults.
     std::string sidebarTitle, sidebarSubtitle;
     std::string modalTitle;
     std::string modalMessage;
@@ -160,12 +180,18 @@ class UiModel {
     Settings settings;
     Presentation presentation{Presentation::Panel2D};
     bool immersiveAvailable{}, immersiveRequested{}, panelRequested{};
+    // Application cinema mode. Hosts suppress their chrome; content keeps rendering.
+    bool interfaceHidden{};
+    // Application supplies its own compact playback controls, without stock dock/glass.
+    bool compactInterface{};
+    Vec2 viewportSize{1440, 990};
     FrameStats stats;
     Page page{Page::Home};
     bool debugVisible{}, recenterRequested{true}, exportRequested{}, exitRequested{}, saveRequested{};
     bool hapticRequested[2]{};
     bool modalOpen{};
     bool passthroughAvailable{};
+    bool passthroughActive{}; // Runtime/compositor state, separate from the saved AR request.
     WindowState windowState{WindowState::Open};
     int settingsTab{};
     std::vector<float> refreshRates{72};
@@ -179,6 +205,9 @@ class UiModel {
     // Dock widgets use a separate surface in virtual coordinates below the main panel.
     void drawDock(DrawList &draw);
     void pointer(size_t index, Vec2 position, bool pressed);
+    void setInterfaceHidden(bool hidden);
+    // True means the activating input was consumed solely to restore the UI.
+    bool revealInterface();
     void navigate(Page next);
     void log(std::string value);
     void tick(double seconds);
@@ -193,6 +222,7 @@ class UiModel {
                    : "";
     }
     void setLanguage(std::string_view language);
+    bool setAugmentedReality(bool enabled);
     std::string statusText() const { return status.empty() ? tr(statusKey) : status; }
     std::string diagnosticJson() const;
     const std::vector<Widget> &widgets() const { return widgets_; }
@@ -218,8 +248,12 @@ class UiModel {
     int exampleChoice_{};
     std::string toast_;
     double time_{}, toastUntil_{};
+    bool sliderUnsaved_{};
+    bool pressed(int id) const { return pointers_[0].capture == id || pointers_[1].capture == id; }
     void action(int id);
-    void slide(int id, float fraction);
+    void slide(int id, float fraction, SliderPhase phase);
+    void requestSliderSave();
+    void cancelApplicationSliders();
     void addWidget(int id, Rect rect, Control type = Control::Button, bool enabled = true);
 };
 } // namespace cyvr

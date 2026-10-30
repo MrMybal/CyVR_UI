@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "cyvr/android.hpp"
+#include "cyvr/android_xr.hpp"
 #include "cyvr/gpu.hpp"
+#include "cyvr/xr_depth.hpp"
 #include "cyvr/storage.hpp"
 #include <android/asset_manager.h>
 #include <android/log.h>
@@ -33,9 +35,11 @@ Pose poseOf(XrPosef pose) {
             {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
 }
 struct Layer {
-    XrSwapchain swapchain{};
+    XrSwapchain swapchain{}, depthSwapchain{};
     std::vector<Target> targets;
+    uint32_t depthImageCount{1};
     uint32_t width{}, height{};
+    uint32_t logicalWidth{}, logicalHeight{};
     bool initialized{};
 };
 class QuestApp {
@@ -44,18 +48,25 @@ class QuestApp {
         : android_(android), config_(config) {
         android_->userData = this;
         android_->onAppCmd = command;
+        android_->onInputEvent = keyInput;
+        extension_=dynamic_cast<AndroidXrRenderExtension*>(config.graphics.get());
     }
     ~QuestApp() {
         if (gpu_.device)
             vkDeviceWaitIdle(gpu_.device);
+        if(config_.graphics)config_.graphics->graphicsStopping(true);
+        if(config_.releaseApplication)config_.releaseApplication();
         for (auto *layer : {&mainLayer_, &debugLayer_, &dockLayer_, &cursorLayer_, &eyes_[0], &eyes_[1]}) {
             if (renderer_)
                 for (auto &target : layer->targets)
                     renderer_->destroyTarget(target);
             if (layer->swapchain)
                 xrDestroySwapchain(layer->swapchain);
+            if (layer->depthSwapchain)
+                xrDestroySwapchain(layer->depthSwapchain);
         }
         renderer_.reset();
+        stopPassthrough();
         if (passthroughLayer_ && destroyPassthroughLayer_)
             destroyPassthroughLayer_(passthroughLayer_);
         if (passthrough_ && destroyPassthrough_)
@@ -71,6 +82,8 @@ class QuestApp {
                 destroyHand_(tracker);
         if (view_)
             xrDestroySpace(view_);
+        if (floor_)
+            xrDestroySpace(floor_);
         if (local_)
             xrDestroySpace(local_);
         if (session_)
@@ -81,6 +94,7 @@ class QuestApp {
             xrDestroyInstance(instance_);
         android_->userData = nullptr;
         android_->onAppCmd = nullptr;
+        android_->onInputEvent = nullptr;
     }
     void run() {
         while (!android_->destroyRequested && (!android_->window || !resumed_))
@@ -96,6 +110,7 @@ class QuestApp {
             if (ui_.panelRequested) {
                 returnPage = int(ui_.page);
                 saveSettings(storage_ + "/preferences.txt", ui_.settings);
+                stopPassthrough();
                 if (running_) xrRequestExitSession(session_);
                 break;
             }
@@ -106,18 +121,32 @@ class QuestApp {
   private:
     android_app *android_;
     const AndroidAppConfig &config_;
+    AndroidXrRenderExtension* extension_{};
+    std::vector<std::string> enabledApplicationExtensions_;
+    float uiScale_{1};
+    bool panelViewRelative_{};
     bool resumed_{}, running_{}, quit_{}, focused_{}, panelPlaced_{}, startupReport_{};
     uint32_t visibleFrames_{};
     XrInstance instance_{};
     XrSystemId system_{};
     XrSession session_{};
-    XrSpace local_{}, view_{};
+    XrSpace local_{}, view_{}, floor_{};
+    Pose sceneAnchor_{};
+    bool scenePlaced_{}, panoramasAttempted_{};
+    XrReferenceSpaceType floorType_{XR_REFERENCE_SPACE_TYPE_STAGE};
+    std::vector<XrEventDataReferenceSpaceChangePending> sceneChanges_;
     XrActionSet actionSet_{};
-    XrAction aim_{}, grip_{}, trigger_{}, haptic_{}, recenter_{}, debug_{};
+    XrAction aim_{}, grip_{}, trigger_{}, haptic_{}, recenter_{}, debug_{}, showInterface_{}, videoStick_{}, videoSqueeze_{};
     std::array<XrPath, 2> hands_{};
     std::array<XrSpace, 2> aimSpaces_{}, gripSpaces_{};
     std::array<bool, 2> pressed_{};
+    std::array<bool, 2> wakeSuppressed_{};
+    int reportedInterfaceHidden_{-1};
+    int reportedRenderState_{-1};
+    XrSpaceLocationFlags reportedHeadFlags_{~XrSpaceLocationFlags{0}};
     bool handEnabled_{}, handAimEnabled_{}, handMeshEnabled_{}, passthroughEnabled_{}, passthroughRunning_{};
+    bool passthroughInterrupted_{}; // Recoverable runtime error: waits for RESTORED, keeps the AR choice.
+    bool depthCompositionEnabled_{};
     std::array<HandSkin, 2> handSkins_;
     XrPassthroughFB passthrough_{};
     XrPassthroughLayerFB passthroughLayer_{};
@@ -166,8 +195,20 @@ class QuestApp {
         auto &self = *static_cast<QuestApp *>(app->userData);
         if (command == APP_CMD_RESUME)
             self.resumed_ = true;
-        if (command == APP_CMD_PAUSE)
+        if (command == APP_CMD_PAUSE) {
             self.resumed_ = false;
+            self.stopPassthrough();
+        }
+        if((command==APP_CMD_RESUME || command==APP_CMD_PAUSE) && self.config_.activityState)
+            self.config_.activityState(command==APP_CMD_RESUME);
+    }
+    static int32_t keyInput(android_app* app,AInputEvent* event){
+        if(AInputEvent_getType(event)!=AINPUT_EVENT_TYPE_KEY || AKeyEvent_getKeyCode(event)!=AKEYCODE_BACK)return 0;
+        auto& self=*static_cast<QuestApp*>(app->userData);
+        if(AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_UP){
+            if(!self.ui_.applicationBack || !self.ui_.applicationBack())self.ui_.panelRequested=true;
+        }
+        return 1;
     }
     void pump(int timeout) {
         int events;
@@ -225,6 +266,15 @@ class QuestApp {
                 throw std::runtime_error(std::string("Required extension: ") + name);
             extensions.push_back(name);
         }
+        depthCompositionEnabled_ = supports(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) &&
+                                   supports(XR_FB_COMPOSITION_LAYER_DEPTH_TEST_EXTENSION_NAME);
+        if (depthCompositionEnabled_) {
+            extensions.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+            extensions.push_back(XR_FB_COMPOSITION_LAYER_DEPTH_TEST_EXTENSION_NAME);
+        }
+        bool localFloor = supports(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME);
+        if (localFloor)
+            extensions.push_back(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME);
         bool refresh = supports(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (refresh)
             extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
@@ -240,6 +290,16 @@ class QuestApp {
             extensions.push_back(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME);
         if (passthroughEnabled_)
             extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+        if(extension_)for(auto name:extension_->instanceExtensions()){
+            enabledApplicationExtensions_.emplace_back(name);
+            if(!supports(name))throw std::runtime_error(std::string("Required application extension: ")+name);
+            if(std::find_if(extensions.begin(),extensions.end(),[&](const char* e){return std::strcmp(e,name)==0;})==extensions.end())extensions.push_back(name);
+        }
+        if(extension_)for(auto name:extension_->optionalInstanceExtensions()){
+            if(!supports(name))continue;
+            if(std::find_if(extensions.begin(),extensions.end(),[&](const char* e){return std::strcmp(e,name)==0;})==extensions.end())extensions.push_back(name);
+            enabledApplicationExtensions_.emplace_back(name);
+        }
         XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
         androidInfo.applicationVM = android_->activity->vm;
         androidInfo.applicationActivity = android_->activity->clazz;
@@ -290,6 +350,18 @@ class QuestApp {
         check(xrCreateReferenceSpace(session_, &reference, &local_), "local space");
         reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
         check(xrCreateReferenceSpace(session_, &reference, &view_), "view space");
+        uint32_t spaceCount{};
+        check(xrEnumerateReferenceSpaces(session_, 0, &spaceCount, nullptr), "reference space count");
+        std::vector<XrReferenceSpaceType> spaces(spaceCount);
+        check(xrEnumerateReferenceSpaces(session_, spaceCount, &spaceCount, spaces.data()),
+              "reference spaces");
+        if (localFloor &&
+            std::find(spaces.begin(), spaces.end(), XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT) != spaces.end())
+            floorType_ = XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT;
+        if (std::find(spaces.begin(), spaces.end(), floorType_) != spaces.end()) {
+            reference.referenceSpaceType = floorType_;
+            check(xrCreateReferenceSpace(session_, &reference, &floor_), "floor space");
+        }
         createActions();
         if (handEnabled_) {
             auto createHand = function<PFN_xrCreateHandTrackerEXT>(instance_, "xrCreateHandTrackerEXT");
@@ -318,11 +390,22 @@ class QuestApp {
             }
         if (format == VK_FORMAT_UNDEFINED)
             throw std::runtime_error("An sRGB color swapchain is required");
+        depthCompositionEnabled_ = depthCompositionEnabled_ &&
+            std::find(formats.begin(), formats.end(), int64_t(VK_FORMAT_D32_SFLOAT)) != formats.end();
+        log(depthCompositionEnabled_ ? "Panel occlusion enabled / compositor stereo D32 depth"
+                                     : "Panel occlusion unavailable / runtime depth composition not supported");
         renderer_ = std::make_unique<VulkanRenderer>(gpu_);
         renderer_->initialize(format, [&](const std::string &name) { return asset(name); });
         controllerSurface_ = HandSurface::load(asset("hand_studio.bin"));
         if (controllerSurface_.vertices.empty())
             log("Studio model unavailable / fallback geometry");
+        if(config_.nativeResolution){
+            uint32_t n{};
+            check(xrEnumerateViewConfigurationViews(instance_,system_,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,0,&n,nullptr),"native view count");
+            std::vector<XrViewConfigurationView> native(n,{XR_TYPE_VIEW_CONFIGURATION_VIEW});
+            check(xrEnumerateViewConfigurationViews(instance_,system_,XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,n,&n,native.data()),"native view sizes");
+            for(const auto& eye:native)uiScale_=std::max(uiScale_,float(eye.recommendedImageRectWidth)/1440.f);
+        }
         createLayer(mainLayer_, 1440, 990, format);
         createLayer(debugLayer_, 620, 760, format);
         createLayer(dockLayer_, dockWidth, dockHeight, format);
@@ -337,10 +420,12 @@ class QuestApp {
                                                 count, &count, views.data()),
               "view sizes");
         for (int i = 0; i < 2; i++) {
-            float ratio = std::min(1.f, 1024.f / std::max(views[i].recommendedImageRectWidth,
+            float ratio = config_.nativeResolution ? 1.f : std::min(1.f, 1440.f / std::max(views[i].recommendedImageRectWidth,
                                                           views[i].recommendedImageRectHeight));
             createLayer(eyes_[i], uint32_t(views[i].recommendedImageRectWidth * ratio),
                         uint32_t(views[i].recommendedImageRectHeight * ratio), format, true);
+            log("Eye target "+std::to_string(eyes_[i].width)+"x"+std::to_string(eyes_[i].height)+
+                (config_.nativeResolution ? " / native recommendation" : " / reference cap"));
         }
         DrawList cursor;
         cursor.rect({4, 4, 56, 56}, Color::hex(0x86e7cf), 28);
@@ -350,8 +435,10 @@ class QuestApp {
         storage_ = android_->activity->externalDataPath ? android_->activity->externalDataPath
                                                         : android_->activity->internalDataPath;
         ui_.settings = loadSettings(storage_ + "/preferences.txt");
-        if (ui_.settings.background == Background::Passthrough && !ui_.passthroughAvailable)
-            ui_.settings.background = Background::Studio;
+        if (ui_.settings.background == Background::Passthrough && !ui_.passthroughAvailable) {
+            ui_.settings.background = ui_.settings.virtualBackground;
+            ui_.saveRequested = true;
+        }
         ui_.refreshRates.clear();
         if (refresh) {
             enumerateRates_ =
@@ -368,6 +455,9 @@ class QuestApp {
         ui_.page = Page(std::clamp(androidInitialPage(android_), 0, 3));
         if (config_.configure)
             config_.configure(ui_);
+        if(config_.graphics)config_.graphics->graphicsReady(gpu_,*renderer_,format,
+            [&](const std::string& name){return asset(name);},ui_);
+        if(extension_)extension_->xrReady({instance_,session_,local_,view_,system_,enabledApplicationExtensions_});
         ui_.drawMain(mainDraw_);
         ui_.drawDock(dockDraw_);
         log("Composited panels / Vulkan / shared atlas");
@@ -394,13 +484,48 @@ class QuestApp {
             result = function<PFN_xrCreatePassthroughLayerFB>(instance_, "xrCreatePassthroughLayerFB")(
                 session_, &layer, &passthroughLayer_);
         }
+        if (XR_SUCCEEDED(result)) {
+            XrPassthroughStyleFB style{XR_TYPE_PASSTHROUGH_STYLE_FB};
+            style.textureOpacityFactor = 1;
+            style.edgeColor = {0, 0, 0, 0};
+            result = function<PFN_xrPassthroughLayerSetStyleFB>(instance_, "xrPassthroughLayerSetStyleFB")(
+                passthroughLayer_, &style);
+        }
         ui_.passthroughAvailable = XR_SUCCEEDED(result) && passthroughLayer_;
+        ui_.invalidate();
         log(ui_.passthroughAvailable ? "Passthrough available"
-                                     : "Passthrough unavailable / native environment active");
+                                     : "Passthrough unavailable / result=" + std::to_string(int(result)));
+    }
+    void reportPassthrough(bool active) {
+        passthroughRunning_ = active;
+        if (ui_.passthroughActive != active) {
+            ui_.passthroughActive = active;
+            ui_.invalidate();
+        }
+    }
+    void stopPassthrough() {
+        if (!passthroughRunning_)
+            return;
+        auto layerResult = pausePassthroughLayer_(passthroughLayer_);
+        auto featureResult = pausePassthrough_(passthrough_);
+        reportPassthrough(false);
+        log("AR passthrough paused / layer=" + std::to_string(int(layerResult)) +
+            " feature=" + std::to_string(int(featureResult)));
+    }
+    void passthroughFailure() {
+        stopPassthrough();
+        passthroughInterrupted_ = false;
+        ui_.passthroughAvailable = false;
+        ui_.setAugmentedReality(false);
+        ui_.notify("toast.passthrough_unavailable");
     }
     void updateBackground() {
-        bool requested =
-            ui_.settings.background == Background::Passthrough && ui_.passthroughAvailable && running_;
+        bool requested = ui_.settings.background == Background::Passthrough && ui_.passthroughAvailable &&
+                         running_ && resumed_ && !passthroughInterrupted_;
+        if (ui_.settings.background == Background::Passthrough && !ui_.passthroughAvailable) {
+            passthroughFailure();
+            return;
+        }
         if (requested == passthroughRunning_)
             return;
         if (requested) {
@@ -409,16 +534,18 @@ class QuestApp {
                 result = resumePassthroughLayer_(passthroughLayer_);
             if (XR_FAILED(result)) {
                 pausePassthrough_(passthrough_);
-                ui_.settings.background = Background::Studio;
-                ui_.saveRequested = true;
-                ui_.notify("toast.passthrough_unavailable");
+                log("AR passthrough start failed / result=" + std::to_string(int(result)));
+                passthroughFailure();
                 return;
             }
+            reportPassthrough(true);
+            log("AR passthrough active / real-world layer under UI");
+            ui_.notify("toast.ar_on");
         } else {
-            pausePassthroughLayer_(passthroughLayer_);
-            pausePassthrough_(passthrough_);
+            stopPassthrough();
+            if (ui_.settings.background != Background::Passthrough)
+                ui_.notify("toast.ar_off");
         }
-        passthroughRunning_ = requested;
     }
     void loadHandMesh(int index) {
         auto get = function<PFN_xrGetHandMeshFB>(instance_, "xrGetHandMeshFB");
@@ -508,6 +635,7 @@ class QuestApp {
         VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         device.queueCreateInfoCount = 1;
         device.pQueueCreateInfos = &queue;
+        if(config_.graphics)config_.graphics->configureDevice(gpu_,device);
         XrVulkanDeviceCreateInfoKHR deviceCreate{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
         deviceCreate.systemId = system_;
         deviceCreate.pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
@@ -539,19 +667,25 @@ class QuestApp {
         create("aim", "Pointer", XR_ACTION_TYPE_POSE_INPUT, true, aim_);
         create("grip", "Hand pose", XR_ACTION_TYPE_POSE_INPUT, true, grip_);
         create("trigger", "Select", XR_ACTION_TYPE_FLOAT_INPUT, true, trigger_);
+        create("video_stick", "Application thumbstick", XR_ACTION_TYPE_VECTOR2F_INPUT, true, videoStick_);
+        create("video_squeeze", "Application grip", XR_ACTION_TYPE_FLOAT_INPUT, true, videoSqueeze_);
         create("haptic", "Feedback", XR_ACTION_TYPE_VIBRATION_OUTPUT, true, haptic_);
         create("recenter", "Recenter", XR_ACTION_TYPE_BOOLEAN_INPUT, false, recenter_);
         create("debug", "Debug HUD", XR_ACTION_TYPE_BOOLEAN_INPUT, false, debug_);
+        create("show_interface", "Show interface", XR_ACTION_TYPE_BOOLEAN_INPUT, false, showInterface_);
         std::vector<XrActionSuggestedBinding> bindings;
         for (auto side : {"left", "right"}) {
             std::string base = std::string("/user/hand/") + side;
             bindings.push_back({aim_, path((base + "/input/aim/pose").c_str())});
             bindings.push_back({grip_, path((base + "/input/grip/pose").c_str())});
             bindings.push_back({trigger_, path((base + "/input/trigger/value").c_str())});
+            bindings.push_back({videoStick_, path((base + "/input/thumbstick").c_str())});
+            bindings.push_back({videoSqueeze_, path((base + "/input/squeeze/value").c_str())});
             bindings.push_back({haptic_, path((base + "/output/haptic").c_str())});
         }
         bindings.push_back({recenter_, path("/user/hand/right/input/thumbstick/click")});
         bindings.push_back({debug_, path("/user/hand/left/input/x/click")});
+        bindings.push_back({showInterface_, path("/user/hand/right/input/a/click")});
         XrInteractionProfileSuggestedBinding profile{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         profile.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
         profile.countSuggestedBindings = uint32_t(bindings.size());
@@ -572,6 +706,8 @@ class QuestApp {
         check(xrAttachSessionActionSets(session_, &attach), "attach actions");
     }
     void createLayer(Layer &layer, uint32_t w, uint32_t h, VkFormat format, bool depth = false) {
+        layer.logicalWidth=w;layer.logicalHeight=h;
+        if(!depth){w=uint32_t(std::lround(w*uiScale_));h=uint32_t(std::lround(h*uiScale_));}
         layer.width = w;
         layer.height = h;
         XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -590,8 +726,24 @@ class QuestApp {
         check(xrEnumerateSwapchainImages(layer.swapchain, count, &count,
                                          reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
               "swapchain images");
-        for (auto &image : images)
-            layer.targets.push_back(renderer_->createTarget(w, h, image.image, depth));
+        std::vector<XrSwapchainImageVulkan2KHR> depthImages;
+        if (depth && depthCompositionEnabled_) {
+            info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            info.format = VK_FORMAT_D32_SFLOAT;
+            check(xrCreateSwapchain(session_, &info, &layer.depthSwapchain), "create scene depth swapchain");
+            uint32_t n{};
+            check(xrEnumerateSwapchainImages(layer.depthSwapchain, 0, &n, nullptr), "depth image count");
+            depthImages.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+            check(xrEnumerateSwapchainImages(layer.depthSwapchain, n, &n,
+                reinterpret_cast<XrSwapchainImageBaseHeader *>(depthImages.data())), "depth images");
+            if (depthImages.empty()) throw std::runtime_error("Empty depth swapchain");
+            layer.depthImageCount = uint32_t(depthImages.size());
+        }
+        for (auto &image : images) {
+            if (depthImages.empty()) layer.targets.push_back(renderer_->createTarget(w, h, image.image, depth));
+            else for (auto &z : depthImages)
+                layer.targets.push_back(renderer_->createTarget(w, h, image.image, true, z.image));
+        }
     }
     void render(Layer &layer, const DrawList &draw, const EnvironmentView *glass = nullptr) {
         uint32_t index;
@@ -600,7 +752,8 @@ class QuestApp {
         XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait.timeout = XR_INFINITE_DURATION;
         check(xrWaitSwapchainImage(layer.swapchain, &wait), "wait UI image");
-        renderer_->draw(layer.targets.at(index), draw, glass);
+        renderer_->draw(layer.targets.at(index), draw, glass, false,
+                        {float(layer.logicalWidth),float(layer.logicalHeight)});
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         check(xrReleaseSwapchainImage(layer.swapchain, &release), "release UI image");
         layer.initialized = true;
@@ -626,15 +779,47 @@ class QuestApp {
                 }
                 if (state.state == XR_SESSION_STATE_STOPPING) {
                     running_ = false;
+                    stopPassthrough();
                     check(xrEndSession(session_), "end session");
                     log("Session suspended");
                 }
                 if (state.state == XR_SESSION_STATE_EXITING || state.state == XR_SESSION_STATE_LOSS_PENDING)
                     quit_ = true;
+            } else if (event.type == XR_TYPE_EVENT_DATA_PASSTHROUGH_STATE_CHANGED_FB) {
+                const auto flags =
+                    reinterpret_cast<const XrEventDataPassthroughStateChangedFB *>(&event)->flags;
+                log("AR passthrough state flags=" + std::to_string(flags));
+                if (flags & XR_PASSTHROUGH_STATE_CHANGED_NON_RECOVERABLE_ERROR_BIT_FB) {
+                    passthroughFailure();
+                } else if (flags & XR_PASSTHROUGH_STATE_CHANGED_REINIT_REQUIRED_BIT_FB) {
+                    stopPassthrough();
+                    passthroughInterrupted_ = false;
+                    if (passthroughLayer_)
+                        destroyPassthroughLayer_(passthroughLayer_);
+                    if (passthrough_)
+                        destroyPassthrough_(passthrough_);
+                    passthroughLayer_ = XR_NULL_HANDLE;
+                    passthrough_ = XR_NULL_HANDLE;
+                    createPassthrough();
+                    if (!ui_.passthroughAvailable)
+                        passthroughFailure();
+                } else if (flags & XR_PASSTHROUGH_STATE_CHANGED_RECOVERABLE_ERROR_BIT_FB) {
+                    passthroughInterrupted_ = true;
+                    stopPassthrough();
+                    ui_.notify("toast.ar_interrupted");
+                } else if (flags & XR_PASSTHROUGH_STATE_CHANGED_RESTORED_ERROR_BIT_FB) {
+                    passthroughInterrupted_ = false; // updateBackground resumes a selected AR view.
+                    ui_.passthroughAvailable = passthrough_ && passthroughLayer_;
+                    ui_.invalidate();
+                }
             } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
                 quit_ = true;
             else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
                 auto &change = *reinterpret_cast<XrEventDataReferenceSpaceChangePending *>(&event);
+                if(extension_)extension_->referenceSpaceChanging(change);
+                if (change.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ||
+                    change.referenceSpaceType == floorType_)
+                    sceneChanges_.push_back(change);
                 if (change.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
                     recenterAfter_ = change.changeTime;
                     ui_.recenterRequested = true;
@@ -650,9 +835,9 @@ class QuestApp {
         check(xrLocateSpace(view_, local_, time, &head), "locate head");
         constexpr XrSpaceLocationFlags valid =
             XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-        if ((head.locationFlags & valid) != valid)
-            return;
-        panel_ = placePanel(poseOf(head.pose), ui_.settings.distance, ui_.settings.scale);
+        if ((head.locationFlags & valid) != valid && (!config_.viewFallback || panelPlaced_))return;
+        panelViewRelative_=(head.locationFlags&valid)!=valid;
+        panel_ = placePanel(panelViewRelative_ ? Pose{} : poseOf(head.pose), ui_.settings.distance, ui_.settings.scale);
         debugPanel_ = panel_;
         positionAccessories();
         ui_.recenterRequested = false;
@@ -685,8 +870,13 @@ class QuestApp {
         constexpr auto valid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
         headValid_ = XR_SUCCEEDED(xrLocateSpace(view_, local_, time, &location)) &&
                      (location.locationFlags & valid) == valid;
+        if (reportedHeadFlags_ != location.locationFlags) {
+            reportedHeadFlags_ = location.locationFlags;
+            log("Head pose flags=" + std::to_string(location.locationFlags));
+        }
         if (!headValid_)
             return;
+        if(panelViewRelative_)recenter(time);
         headPose_ = poseOf(location.pose);
         if (panelPlaced_ && !ui_.interacting() && windowDragIndex_ < 0) {
             Pose target = panel_.pose;
@@ -743,7 +933,7 @@ class QuestApp {
         for (int j = 0; j < 26; j++)
             rig[j] = {poseOf(joints[j].pose), joints[j].radius,
                       (joints[j].locationFlags & jointValid) == jointValid};
-        if (ui_.settings.handModel != HandModel::Hidden) {
+        if (!ui_.interfaceHidden && ui_.settings.handModel != HandModel::Hidden) {
             bool skinned = ui_.settings.handModel == HandModel::Automatic &&
                            !handSkins_[index].vertices.empty() &&
                            spatial_.skinnedHand(handSkins_[index], rig, Color::hex(0xcbdcde),
@@ -816,6 +1006,8 @@ class QuestApp {
             for (int i = 0; i < 2; i++) {
                 hits_[i] = {};
                 pressed_[i] = false;
+                wakeSuppressed_[i] = false;
+                if(ui_.applicationController)ui_.applicationController(i,{},0,0,{},false);
                 ui_.pointer(i, {-100, -100}, false);
             }
             windowDragIndex_ = -1;
@@ -827,9 +1019,10 @@ class QuestApp {
         sync.activeActionSets = &active;
         XrResult result = xrSyncActions(session_, &sync);
         check(result, "sync actions");
-        if (focused_ && booleanAction(recenter_))
+        if (booleanAction(showInterface_)) ui_.revealInterface();
+        if (focused_ && booleanAction(recenter_) && !ui_.revealInterface())
             ui_.recenterRequested = true;
-        if (focused_ && booleanAction(debug_)) {
+        if (focused_ && booleanAction(debug_) && !ui_.revealInterface()) {
             ui_.debugVisible = !ui_.debugVisible;
             ui_.invalidate();
         }
@@ -844,6 +1037,8 @@ class QuestApp {
             XrActionStateFloat trigger{XR_TYPE_ACTION_STATE_FLOAT};
             check(xrGetActionStateFloat(session_, &get, &trigger), "trigger state");
             bool down = focused_ && trigger.isActive && trigger.currentState > (pressed_[i] ? .35f : .55f);
+            bool controllerDown = down;
+            Pose applicationPose{};
             constexpr XrSpaceLocationFlags valid =
                 XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
             if (aim.isActive) {
@@ -851,12 +1046,13 @@ class QuestApp {
                 check(xrLocateSpace(aimSpaces_[i], local_, time, &location), "locate pointer");
                 if ((location.locationFlags & valid) == valid) {
                     Pose aimPose = poseOf(location.pose);
+                    applicationPose=aimPose;
                     rayOrigin_[i] = aimPose.position;
                     rayDirection_[i] = rotate(aimPose.orientation, {0, 0, -1});
                     rayValid_[i] = true;
                     XrSpaceLocation grip{XR_TYPE_SPACE_LOCATION};
                     check(xrLocateSpace(gripSpaces_[i], local_, time, &grip), "locate hand");
-                    if ((grip.locationFlags & valid) == valid)
+                    if (!ui_.interfaceHidden && (grip.locationFlags & valid) == valid)
                         spatial_.controllerHand(poseOf(grip.pose), i == 0, trigger.currentState,
                                                 ui_.settings.handModel, ui_.settings.handScale,
                                                 ui_.settings.handPitch, &controllerSurface_);
@@ -868,6 +1064,26 @@ class QuestApp {
             }
             if (!rayValid_[i])
                 down = false;
+            if(ui_.applicationController){
+                get.action=videoStick_;
+                XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+                check(xrGetActionStateVector2f(session_,&get,&stick),"application stick");
+                get.action=videoSqueeze_;
+                XrActionStateFloat squeeze{XR_TYPE_ACTION_STATE_FLOAT};
+                check(xrGetActionStateFloat(session_,&get,&squeeze),"application grip");
+                const bool consumed=ui_.applicationController(i,stick.isActive?Vec2{stick.currentState.x,stick.currentState.y}:Vec2{},
+                  trigger.isActive?trigger.currentState:0,squeeze.isActive?squeeze.currentState:0,applicationPose,rayValid_[i]&&aim.isActive);
+                if(consumed){ui_.pointer(i,{-100,-100},false);pressed_[i]=false;continue;}
+            }
+            const bool selecting = controllerDown || down;
+            if (!selecting) wakeSuppressed_[i] = false;
+            if (selecting && !pressed_[i] && ui_.revealInterface())
+                wakeSuppressed_[i] = true;
+            if (wakeSuppressed_[i]) {
+                ui_.pointer(i, {-100, -100}, false);
+                pressed_[i] = selecting;
+                continue;
+            }
             Hit planeHit = pointerHit(i, true);
             ui_.pointer(i, planeHit.valid ? planeHit.pixels : Vec2{-100, -100}, down);
             pressed_[i] = down;
@@ -886,6 +1102,12 @@ class QuestApp {
                     __android_log_print(ANDROID_LOG_WARN, "CyVR", "Haptic unavailable: %d", h);
             }
         }
+        if (ui_.interfaceHidden) {
+            spatial_.clear(); // No controller/hand meshes, rays or cursors over the movie.
+            hits_.fill({});
+            windowDragIndex_ = -1;
+            return;
+        }
         moveWindow(time);
         for (int i = 0; i < 2; i++)
             if (rayValid_[i]) {
@@ -897,14 +1119,15 @@ class QuestApp {
             }
     }
     Hit pointerHit(int i, bool capture) {
+        if (ui_.interfaceHidden) return {};
         if (!rayValid_[i] || !panelPlaced_)
             return {};
         int id = ui_.captured(i);
-        bool inDock = id >= 600 && id != 605;
+        bool inDock = isDockWidget(id);
         Hit main;
         if (ui_.windowState == WindowState::Open && !inDock)
             main = intersectPanel(rayOrigin_[i], rayDirection_[i], panel_, !(capture && id));
-        Hit dock = intersectPanel(rayOrigin_[i], rayDirection_[i], dockPanel_, !(capture && inDock && id));
+        Hit dock = ui_.compactInterface ? Hit{} : intersectPanel(rayOrigin_[i], rayDirection_[i], dockPanel_, !(capture && inDock && id));
         if (dock.valid && (!main.valid || dock.distance < main.distance)) {
             dock.pixels.x += dockOriginX;
             dock.pixels.y += dockOriginY;
@@ -914,8 +1137,55 @@ class QuestApp {
         hitPanels_[i] = panel_;
         return main;
     }
-    bool projectSpatial(XrTime time, std::array<XrCompositionLayerProjectionView, 2> &output) {
-        if (spatial_.vertices.empty() && ui_.settings.background == Background::Passthrough)
+    void updateScene(XrTime time) {
+        for (auto change = sceneChanges_.begin(); change != sceneChanges_.end();) {
+            if (change->changeTime > time) {
+                ++change;
+                continue;
+            }
+            if (change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL && change->poseValid &&
+                scenePlaced_)
+                sceneAnchor_ = relativePose(poseOf(change->poseInPreviousSpace), sceneAnchor_);
+            else
+                scenePlaced_ = false;
+            change = sceneChanges_.erase(change);
+            ui_.invalidate();
+        }
+        if (isScene3D(ui_.settings.background)) {
+            if (!scenePlaced_ && headValid_) {
+                float floor = headPose_.position.y - 1.65f;
+                bool measured = false;
+                XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+                if (floor_ && XR_SUCCEEDED(xrLocateSpace(floor_, local_, time, &location)) &&
+                    (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                    floor = location.pose.position.y;
+                    measured = true;
+                }
+                sceneAnchor_ = placeScene(headPose_, floor);
+                scenePlaced_ = true;
+                log(measured ? "3D room anchored to tracked floor"
+                             : "3D room floor estimated 1.65 m below initial view");
+            }
+            auto oldCount = renderer_->sceneVertexCount();
+            renderer_->setScene(ui_.settings.background, sceneAnchor_,
+                                [&](const std::string &name) { return asset(name); });
+            if (oldCount != renderer_->sceneVertexCount()) {
+                log("3D scene / " + std::to_string(renderer_->sceneVertexCount() / 3) + " static triangles");
+                log(renderer_->bakedSceneLighting() ? "Offline triangle lighting bake loaded"
+                                                    : "Neutral fallback lighting");
+            }
+        } else if (!panoramasAttempted_ && (ui_.settings.background == Background::Studio ||
+                                            ui_.settings.background == Background::Night)) {
+            renderer_->loadEnvironments([&](const std::string &name) { return asset(name); });
+            panoramasAttempted_ = true;
+            log(renderer_->photographicEnvironments()
+                    ? "4K CC0 photographic environments loaded"
+                    : "Procedural fallback / optional panorama assets unavailable");
+        }
+    }
+    bool projectSpatial(XrTime time, std::array<XrCompositionLayerProjectionView, 2> &output,
+                        std::array<XrCompositionLayerDepthInfoKHR, 2> &depthInfo) {
+        if (spatial_.vertices.empty() && (ui_.settings.background == Background::Passthrough || ui_.settings.background == Background::Black))
             return false;
         std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
         XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
@@ -937,27 +1207,43 @@ class QuestApp {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             wait.timeout = XR_INFINITE_DURATION;
             check(xrWaitSwapchainImage(layer.swapchain, &wait), "wait hands");
+            uint32_t depthImage{};
+            if (layer.depthSwapchain) {
+                check(xrAcquireSwapchainImage(layer.depthSwapchain, &acquire, &depthImage), "acquire scene depth");
+                check(xrWaitSwapchainImage(layer.depthSwapchain, &wait), "wait scene depth");
+            }
             auto &fov = views[i].fov;
             auto environment = environmentView(poseOf(views[i].pose), fov.angleLeft, fov.angleRight,
                                                fov.angleUp, fov.angleDown, ui_.settings);
-            renderer_->drawSpatial(layer.targets.at(image), spatial_,
+            renderer_->drawSpatial(layer.targets.at(image * layer.depthImageCount + depthImage), spatial_,
                                    viewProjection(poseOf(views[i].pose), fov.angleLeft, fov.angleRight,
                                                   fov.angleUp, fov.angleDown),
                                    &environment);
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             check(xrReleaseSwapchainImage(layer.swapchain, &release), "release hands");
+            if (layer.depthSwapchain)
+                check(xrReleaseSwapchainImage(layer.depthSwapchain, &release), "release scene depth");
             output[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
             output[i].pose = views[i].pose;
             output[i].fov = fov;
             output[i].subImage.swapchain = layer.swapchain;
             output[i].subImage.imageRect = {{0, 0}, {int32_t(layer.width), int32_t(layer.height)}};
+            if (layer.depthSwapchain) {
+                auto &depth = depthInfo[i];
+                depth = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+                depth.subImage = output[i].subImage;
+                depth.subImage.swapchain = layer.depthSwapchain;
+                depth.minDepth = 0; depth.maxDepth = 1;
+                depth.nearZ = spatialNearZ; depth.farZ = spatialFarZ;
+                output[i].next = &depth;
+            }
         }
         return true;
     }
     XrCompositionLayerQuad quad(const Layer &layer, const PanelGeometry &geometry) {
         XrCompositionLayerQuad out{XR_TYPE_COMPOSITION_LAYER_QUAD};
         out.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-        out.space = local_;
+        out.space = panelViewRelative_ ? view_ : local_;
         out.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         out.subImage.swapchain = layer.swapchain;
         out.subImage.imageRect = {{0, 0}, {int32_t(layer.width), int32_t(layer.height)}};
@@ -984,6 +1270,7 @@ class QuestApp {
         updatePlacement(state.predictedDisplayTime,
                         float(std::min(.1, ui_.stats.count ? 1 / ui_.stats.fps() : 1 / 72.)));
         input(state.predictedDisplayTime);
+        updateScene(state.predictedDisplayTime);
         updateBackground();
         if (ui_.saveRequested) {
             ui_.saveRequested = false;
@@ -1013,33 +1300,49 @@ class QuestApp {
             bool written = exportDiagnostic(storage_ + "/diagnostic.json", ui_);
             ui_.notify(written ? "toast.exported_quest" : "toast.export_failed");
         }
-        std::array<XrCompositionLayerQuad, 8> quads{};
-        std::array<const XrCompositionLayerBaseHeader *, 8> layers{};
-        uint32_t count = 0;
+        std::array<XrCompositionLayerQuad, 16> quads{};
+        std::array<const XrCompositionLayerBaseHeader *, 16> layers{};
+        uint32_t count = 0, applicationLayers = 0, chromeLayers = 0;
         std::array<XrCompositionLayerProjectionView, 2> projectedViews{};
+        std::array<XrCompositionLayerDepthInfoKHR, 2> projectedDepth{};
+        DepthComposition panelDepth;
+        XrCompositionLayerDepthTestFB sceneDepth{XR_TYPE_COMPOSITION_LAYER_DEPTH_TEST_FB};
+        sceneDepth.depthMask = XR_TRUE;
+        sceneDepth.compareOp = XR_COMPARE_OP_ALWAYS_FB;
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         projection.space = local_;
+        if (depthCompositionEnabled_) projection.next = &sceneDepth;
         projection.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         projection.viewCount = 2;
         projection.views = projectedViews.data();
         XrCompositionLayerPassthroughFB passthrough{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+        passthrough.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         passthrough.layerHandle = passthroughLayer_;
         if (state.shouldRender && panelPlaced_) {
             if (passthroughRunning_)
                 layers[count++] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&passthrough);
-            if (projectSpatial(state.predictedDisplayTime, projectedViews))
+            if (projectSpatial(state.predictedDisplayTime, projectedViews, projectedDepth))
                 layers[count++] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&projection);
+            if(config_.graphics && config_.graphics->beforeRender(ui_,seconds))ui_.invalidate();
+            if(extension_){
+                const auto added=extension_->compositionLayers({state.predictedDisplayTime,
+                    panelViewRelative_ ? view_ : local_,panel_},layers.data()+count,8);
+                if(added>8)throw std::runtime_error("Application composition layer budget exceeded");
+                applicationLayers = added;
+                count+=added;
+            }
             bool changed = drawnRevision_ != ui_.revision;
-            if (changed || !mainLayer_.initialized) {
+            const uint32_t chromeStart = count;
+            if (!ui_.interfaceHidden && (changed || !mainLayer_.initialized)) {
                 ui_.drawMain(mainDraw_);
                 ui_.drawDock(dockDraw_);
                 drawnRevision_ = ui_.revision;
             }
-            if (dockRevision_ != ui_.revision || !dockLayer_.initialized) {
+            if (!ui_.interfaceHidden && (dockRevision_ != ui_.revision || !dockLayer_.initialized)) {
                 render(dockLayer_, dockDraw_);
                 dockRevision_ = ui_.revision;
             }
-            if (ui_.windowState == WindowState::Open) {
+            if (!ui_.interfaceHidden && ui_.windowState == WindowState::Open) {
                 auto glass = glassView(headPose_, panel_, ui_.settings);
                 auto orientationDelta = [](Quat a, Quat b) {
                     return 1 - std::abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
@@ -1049,7 +1352,7 @@ class QuestApp {
                              orientationDelta(glassPanel_.orientation, panel_.pose.orientation) > .00001f;
                 if (changed || !mainLayer_.initialized ||
                     (glass.options[3] > 0 && moved && seconds - lastGlassRender_ > 1 / 30.)) {
-                    render(mainLayer_, mainDraw_, &glass);
+                    render(mainLayer_, mainDraw_, ui_.compactInterface ? nullptr : &glass);
                     lastGlassRender_ = seconds;
                     glassEye_ = headPose_;
                     glassPanel_ = panel_.pose;
@@ -1059,7 +1362,7 @@ class QuestApp {
                 count++;
             }
             visibleFrames_++;
-            if (ui_.debugVisible && ui_.windowState == WindowState::Open) {
+            if (!ui_.interfaceHidden && !ui_.compactInterface && ui_.debugVisible && ui_.windowState == WindowState::Open) {
                 if (seconds - lastDebugRender_ >= .5 || !debugLayer_.initialized) {
                     ui_.drawDebug(debugDraw_);
                     render(debugLayer_, debugDraw_);
@@ -1069,11 +1372,13 @@ class QuestApp {
                 layers[count] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&quads[count]);
                 count++;
             }
-            quads[count] = quad(dockLayer_, dockPanel_);
-            layers[count] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&quads[count]);
-            count++;
+            if (!ui_.interfaceHidden && !ui_.compactInterface) {
+                quads[count] = quad(dockLayer_, dockPanel_);
+                layers[count] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&quads[count]);
+                count++;
+            }
             for (int i = 0; i < 2; i++)
-                if (hits_[i].valid) {
+                if (!ui_.interfaceHidden && hits_[i].valid) {
                     PanelGeometry cursor;
                     cursor.pose = hitPanels_[i].pose;
                     cursor.pose.position =
@@ -1085,15 +1390,35 @@ class QuestApp {
                     layers[count] = reinterpret_cast<XrCompositionLayerBaseHeader *>(&quads[count]);
                     count++;
                 }
+            chromeLayers = count - chromeStart;
         }
         ui_.stats.cpuMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
         end.displayTime = state.predictedDisplayTime;
         end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        if (depthCompositionEnabled_)
+            for (uint32_t i = 0; i < count; ++i) layers[i] = panelDepth.test(layers[i], i);
         end.layerCount = count;
         end.layers = layers.data();
+        int renderState = int(state.shouldRender) | (panelPlaced_ ? 2 : 0) | (headValid_ ? 4 : 0) |
+                          (focused_ ? 8 : 0) | (passthroughRunning_ ? 16 : 0);
+        if (renderState != reportedRenderState_) {
+            reportedRenderState_ = renderState;
+            log("XR render should=" + std::to_string(state.shouldRender) +
+                " panel=" + std::to_string(panelPlaced_) + " head=" + std::to_string(headValid_) +
+                " focused=" + std::to_string(focused_) + " ar=" + std::to_string(passthroughRunning_) +
+                " layers=" + std::to_string(count));
+        }
         check(xrEndFrame(session_, &end), "end frame");
+        if (count && config_.graphics)
+            config_.graphics->frameSubmitted(ui_);
+        if (state.shouldRender && panelPlaced_ && reportedInterfaceHidden_ != int(ui_.interfaceHidden)) {
+            reportedInterfaceHidden_ = int(ui_.interfaceHidden);
+            log("CINEMA interface_hidden=" + std::to_string(reportedInterfaceHidden_) +
+                " chrome_layers=" + std::to_string(chromeLayers) +
+                " application_layers=" + std::to_string(applicationLayers));
+        }
         if (!startupReport_ && focused_ && visibleFrames_ >= 240) {
             startupReport_ = true;
             exportDiagnostic(storage_ + "/startup-diagnostic.json", ui_);
@@ -1103,12 +1428,19 @@ class QuestApp {
 };
 } // namespace
 void cyvr::runImmersiveAndroidApp(android_app *android, const AndroidAppConfig &config) {
-    int page;
-    {
+    int page = -1;
+    bool failed = false;
+    try {
         QuestApp app(android, config);
         app.run();
         page = app.returnPage;
+    } catch (const std::exception &error) {
+        // Unwinding has released whatever the session had created.
+        __android_log_print(ANDROID_LOG_ERROR, "CyVR", "Immersive host failed: %s", error.what());
+        failed = true;
     }
+    if (failed && !android->destroyRequested)
+        page = androidInitialPage(android);
     // Release the XR session and GPU before asking Horizon OS to restore a panel.
-    if (page >= 0) androidSwitchPresentation(android, Presentation::Panel2D, page);
+    if (page >= 0) androidSwitchPresentation(android, Presentation::Panel2D, page, failed);
 }

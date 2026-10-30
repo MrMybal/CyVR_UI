@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:metavr="http://schemas.meta.com/metavr-sdk" package="com.cyvr.ui" android:versionCode="5" android:versionName="0.4.0" android:installLocation="auto">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:metavr="http://schemas.meta.com/metavr-sdk" package="com.cyvr.ui" android:versionCode="10" android:versionName="0.8.0" android:installLocation="auto">
     <uses-sdk android:minSdkVersion="32" android:targetSdkVersion="34" />
     <metavr:uses-metavr-sdk metavr:minSdkVersion="69" metavr:targetSdkVersion="207" />
-    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />

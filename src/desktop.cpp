@@ -25,7 +25,7 @@ struct Desktop {
     DrawList draw;
     HandSurface controllerSurface;
     std::vector<uint8_t> bitmap;
-    fs::path directory;
+    fs::path directory, assetDirectory;
     uint64_t rendered{};
     HWND window{};
     bool pressed{};
@@ -37,6 +37,7 @@ struct Desktop {
             renderer.destroyTarget(target);
     }
     void initialize(const fs::path &assets) {
+        assetDirectory = assets;
         model.presentation = Presentation::Immersive;
         context.createStandalone();
         renderer.initialize(VK_FORMAT_R8G8B8A8_SRGB, [&](const std::string &name) {
@@ -82,6 +83,11 @@ struct Desktop {
             }
         }
         PanelGeometry p = placePanel({{0, 1.6f, 0}, {}}, model.settings.distance, model.settings.scale);
+        if (isScene3D(model.settings.background))
+            renderer.setScene(model.settings.background, {}, [&](const std::string &name) {
+                std::ifstream file(assetDirectory / name, std::ios::binary);
+                return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), {});
+            });
         EnvironmentView glass = glassView({{0, 1.6f, 0}, {}}, p, model.settings);
         glass.shape = {1440.f / canvasHeight, 30.f / canvasHeight, 1, 0};
         renderer.draw(target, draw, &glass);
@@ -93,18 +99,30 @@ struct Desktop {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
         rendered = model.revision;
     }
-    void spatialPreview() {
+    void spatialPreview(bool environmentOnly = false, float eyeX = 0, float eyeZ = 0, float yaw = 0) {
+        if (isScene3D(model.settings.background))
+            renderer.setScene(model.settings.background, {}, [&](const std::string &name) {
+                std::ifstream file(assetDirectory / name, std::ios::binary);
+                return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), {});
+            });
+        else
+            renderer.loadEnvironments([&](const std::string &name) {
+                std::ifstream file(assetDirectory / name, std::ios::binary);
+                return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), {});
+            });
         renderer.destroyTarget(target);
         target = renderer.createTarget(1440, canvasHeight, VK_NULL_HANDLE, true);
         SpatialMesh mesh;
-        mesh.controllerHand({{-.13f, -.03f, -.40f}, yawRotation(-.35f)}, true, .2f, model.settings.handModel,
+        mesh.controllerHand({{-.13f, 1.35f, -.40f}, yawRotation(-.35f)}, true, .2f, model.settings.handModel,
                             model.settings.handScale, model.settings.handPitch, &controllerSurface);
-        mesh.controllerHand({{.13f, -.03f, -.40f}, yawRotation(.35f)}, false, .7f, model.settings.handModel,
+        mesh.controllerHand({{.13f, 1.35f, -.40f}, yawRotation(.35f)}, false, .7f, model.settings.handModel,
                             model.settings.handScale, model.settings.handPitch, &controllerSurface);
-        mesh.bone({-.19f, -.09f, -.55f}, {-.08f, .1f, -1.35f}, .0012f, Color::hex(0x86e7cf), 6);
-        mesh.bone({.19f, -.09f, -.55f}, {.08f, .1f, -1.35f}, .0012f, Color::hex(0x86e7cf), 6);
-        auto env = environmentView({{0, 1.6f, 0}, {}}, -.7f, .7f, .52f, -.52f, model.settings);
-        renderer.drawSpatial(target, mesh, viewProjection({{}, {}}, -.7f, .7f, .52f, -.52f), &env);
+        mesh.bone({-.19f, 1.29f, -.55f}, {-.08f, 1.5f, -1.35f}, .0012f, Color::hex(0x86e7cf), 6);
+        mesh.bone({.19f, 1.29f, -.55f}, {.08f, 1.5f, -1.35f}, .0012f, Color::hex(0x86e7cf), 6);
+        if (environmentOnly) mesh.clear();
+        Pose eye{{eyeX, 1.6f, eyeZ}, yawRotation(yaw)};
+        auto env = environmentView(eye, -.86f, .86f, .735f, -.735f, model.settings);
+        renderer.drawSpatial(target, mesh, viewProjection(eye, -.86f, .86f, .735f, -.735f), &env);
         bitmap = renderer.readback(target);
         for (size_t i = 0; i < bitmap.size(); i += 4)
             std::swap(bitmap[i], bitmap[i + 2]);
@@ -257,8 +275,10 @@ int main(int argc, char **argv) {
         fs::path assets = dir / "assets", snapshot;
         Page page = Page::Home;
         std::string language;
-        int settingsTab = 0, theme = -1, handModel = -1, windowState = 0, hoverId = 0;
-        bool spatialPreview = false;
+        int settingsTab = 0, theme = -1, handModel = -1, windowState = 0, hoverId = 0, background = -1;
+        bool spatialPreview = false, environmentOnly = false, panelPreview = false, modalPreview = false,
+             toastPreview = false, hudPreview = false;
+        float eyeX = 0, eyeZ = 0, eyeYaw = 0;
         for (int i = 1; i < argc; i++) {
             std::string argument = argv[i];
             if (argument == "--assets" && i + 1 < argc)
@@ -267,6 +287,14 @@ int main(int argc, char **argv) {
                 snapshot = argv[++i];
             else if (argument == "--language" && i + 1 < argc)
                 language = argv[++i];
+            else if (argument == "--background" && i + 1 < argc)
+                background = std::stoi(argv[++i]);
+            else if (argument == "--eye-x" && i + 1 < argc)
+                eyeX = std::stof(argv[++i]);
+            else if (argument == "--eye-z" && i + 1 < argc)
+                eyeZ = std::stof(argv[++i]);
+            else if (argument == "--eye-yaw" && i + 1 < argc)
+                eyeYaw = std::stof(argv[++i]);
             else if (argument == "--theme" && i + 1 < argc)
                 theme = std::stoi(argv[++i]);
             else if (argument == "--tab" && i + 1 < argc)
@@ -275,11 +303,20 @@ int main(int argc, char **argv) {
                 handModel = std::stoi(argv[++i]);
             else if (argument == "--window-state" && i + 1 < argc)
                 windowState = std::stoi(argv[++i]);
+            else if (argument == "--panel")
+                panelPreview = true;
+            else if (argument == "--modal")
+                modalPreview = true;
+            else if (argument == "--toast")
+                toastPreview = true;
+            else if (argument == "--hud")
+                hudPreview = true;
             else if (argument == "--hover-id" && i + 1 < argc)
                 hoverId = std::stoi(argv[++i]);
             else if (argument == "--page" && i + 1 < argc) {
                 std::string p = argv[++i];
-                spatialPreview = p == "spatial";
+                environmentOnly = p == "environment";
+                spatialPreview = p == "spatial" || environmentOnly;
                 page = p == "components" ? Page::Components
                        : p == "settings" ? Page::Settings
                        : p == "debug"    ? Page::Diagnostics
@@ -304,12 +341,28 @@ int main(int argc, char **argv) {
             app.model.settings.language = resolveLocale(language).code;
         if (theme >= 0)
             app.model.settings.theme = Theme(theme);
+        if (background >= 0)
+            app.model.settings.background = Background(background);
         if (handModel >= 0)
             app.model.settings.handModel = HandModel(handModel);
         app.model.settings.sanitize();
+        if (app.demoPreview && app.model.settings.background == Background::Passthrough) {
+            // UI fixture only; a Windows snapshot never contains headset camera pixels.
+            app.model.passthroughAvailable = true;
+            app.model.passthroughActive = true;
+        }
         app.model.settingsTab = std::clamp(settingsTab, 0, 2);
         app.model.windowState = WindowState(std::clamp(windowState, 0, 2));
+        if (panelPreview) {
+            app.model.presentation = Presentation::Panel2D;
+            app.model.immersiveAvailable = true;
+            app.model.statusKey = "status.panel";
+        }
         app.model.navigate(page);
+        app.model.modalOpen = modalPreview;
+        app.model.debugVisible = hudPreview;
+        if (toastPreview)
+            app.model.notify("toast.exported_desktop");
         if (hoverId) {
             DrawList sample;
             app.model.drawMain(sample);
@@ -322,7 +375,7 @@ int main(int argc, char **argv) {
         }
         if (!snapshot.empty()) {
             if (spatialPreview)
-                app.spatialPreview();
+                app.spatialPreview(environmentOnly, eyeX, eyeZ, eyeYaw);
             else
                 app.render();
             std::ofstream out(snapshot, std::ios::binary);
@@ -344,7 +397,7 @@ int main(int argc, char **argv) {
         cls.lpszClassName = L"CyVR.NativeReference";
         cls.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
         RegisterClassW(&cls);
-        HWND window = CreateWindowExW(0, cls.lpszClassName, L"CyVR UI — Native C++ / Vulkan reference",
+        HWND window = CreateWindowExW(0, cls.lpszClassName, L"CyVR UI \u2014 Native C++ / Vulkan reference",
                                       WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1300, 940, nullptr,
                                       nullptr, cls.hInstance, &app);
         if (!window)

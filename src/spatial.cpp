@@ -6,8 +6,8 @@ static Vec3 cross3(Vec3 a, Vec3 b) {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 Mat4 viewProjection(Pose pose, float left, float right, float up, float down) {
-    float l = std::tan(left), r = std::tan(right), u = std::tan(up), d = std::tan(down), near = .04f,
-          far = 12;
+    float l = std::tan(left), r = std::tan(right), u = std::tan(up), d = std::tan(down), near = spatialNearZ,
+          far = spatialFarZ;
     Mat4 projection{};
     projection[0] = 2 / (r - l);
     projection[5] = 2 / (d - u);

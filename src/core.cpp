@@ -124,13 +124,96 @@ void DrawList::triangle(Vec2 a, Vec2 b, Vec2 c, Color color) {
     for (auto p : {a, b, c})
         vertices.push_back({p.x, p.y, .0015f, .0015f, color.r, color.g, color.b, color.a});
 }
+// ui.frag treats u >= 8 as a distance shape: u = 10 + 4 * band + p.x, v = p.y, where |p| = 1 is the
+// outer edge and band / 255 the inner edge of a ring. Band 0 is solid.
+static void shape(std::vector<Vertex> &out, Rect r, Vec2 p0, Vec2 p1, Color color, float inner = 0) {
+    const float offset = 10 + 4 * std::round(std::clamp(inner, 0.f, 1.f) * 255);
+    auto v = [&](float x, float y, float px, float py) {
+        return Vertex{x, y, offset + px, py, color.r, color.g, color.b, color.a};
+    };
+    Vertex a = v(r.x, r.y, p0.x, p0.y), b = v(r.x + r.w, r.y, p1.x, p0.y),
+           c = v(r.x + r.w, r.y + r.h, p1.x, p1.y), d = v(r.x, r.y + r.h, p0.x, p1.y);
+    for (auto vertex : {a, b, c, a, c, d})
+        out.push_back(vertex);
+}
+static void solidRect(DrawList &d, Rect r, Color color) {
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    d.triangle({r.x, r.y}, {r.x + r.w, r.y}, {r.x, r.y + r.h}, color);
+    d.triangle({r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}, color);
+}
+static void corners(std::vector<Vertex> &out, Rect r, float radius, Color color, float inner) {
+    float right = r.x + r.w - radius, bottom = r.y + r.h - radius;
+    shape(out, {r.x, r.y, radius, radius}, {-1, -1}, {0, 0}, color, inner);
+    shape(out, {right, r.y, radius, radius}, {0, -1}, {1, 0}, color, inner);
+    shape(out, {right, bottom, radius, radius}, {0, 0}, {1, 1}, color, inner);
+    shape(out, {r.x, bottom, radius, radius}, {-1, 0}, {0, 1}, color, inner);
+}
 void DrawList::rect(Rect r, Color color, float radius) {
     if (r.w <= 0 || r.h <= 0)
         return;
     radius = std::min({radius, r.w * .5f, r.h * .5f});
+    if (radius < 1) {
+        solidRect(*this, r, color);
+        return;
+    }
+    // Nine slices share their vertices, so no T-junction can open a crack when scaled.
+    float x0 = r.x + radius, x1 = r.x + r.w - radius, y0 = r.y + radius, y1 = r.y + r.h - radius;
+    solidRect(*this, {x0, r.y, x1 - x0, radius}, color);
+    solidRect(*this, {r.x, y0, radius, y1 - y0}, color);
+    solidRect(*this, {x0, y0, x1 - x0, y1 - y0}, color);
+    solidRect(*this, {x1, y0, radius, y1 - y0}, color);
+    solidRect(*this, {x0, y1, x1 - x0, radius}, color);
+    corners(vertices, r, radius, color, 0);
+}
+void DrawList::border(Rect r, Color color, float radius, float width) {
+    if (r.w <= 0 || r.h <= 0 || width <= 0)
+        return;
+    radius = std::max(width, std::min({radius, r.w * .5f, r.h * .5f}));
+    float x0 = r.x + radius, x1 = r.x + r.w - radius, y0 = r.y + radius, y1 = r.y + r.h - radius;
+    solidRect(*this, {x0, r.y, x1 - x0, width}, color);
+    solidRect(*this, {x0, r.y + r.h - width, x1 - x0, width}, color);
+    solidRect(*this, {r.x, y0, width, y1 - y0}, color);
+    solidRect(*this, {r.x + r.w - width, y0, width, y1 - y0}, color);
+    corners(vertices, r, radius, color, (radius - width) / radius);
+}
+void DrawList::circle(Vec2 c, float radius, Color color) {
+    ring(c, radius, radius, color);
+}
+void DrawList::ring(Vec2 c, float radius, float width, Color color) {
+    if (radius <= 0)
+        return;
+    // One pixel of margin keeps the edge filter from flattening the four tangent points.
+    float pad = std::min(radius, 1.f), extent = 1 + pad / radius;
+    shape(vertices, {c.x - radius - pad, c.y - radius - pad, 2 * (radius + pad), 2 * (radius + pad)},
+          {-extent, -extent}, {extent, extent}, color, 1 - width / radius);
+}
+static void capsule(std::vector<Vertex> &out, Vec2 a, Vec2 b, Color color, float width) {
+    float dx = b.x - a.x, dy = b.y - a.y, l = std::sqrt(dx * dx + dy * dy);
+    if (l < .001f)
+        return;
+    float half = width * .5f, pad = half + 1, extent = pad / half;
+    Vec2 o{-dy / l * pad, dx / l * pad};
+    auto v = [&](Vec2 p, float across) {
+        return Vertex{p.x, p.y, 10, across, color.r, color.g, color.b, color.a};
+    };
+    Vertex p = v({a.x + o.x, a.y + o.y}, extent), q = v({b.x + o.x, b.y + o.y}, extent),
+           r = v({b.x - o.x, b.y - o.y}, -extent), s = v({a.x - o.x, a.y - o.y}, -extent);
+    for (auto vertex : {p, q, r, p, r, s})
+        out.push_back(vertex);
+}
+void DrawList::polyline(const Vec2 *points, size_t count, Color color, float width, bool closed) {
+    for (size_t i = 0; i < count; i++) {
+        circle(points[i], width * .5f, color);
+        if (i + 1 < count)
+            capsule(vertices, points[i], points[i + 1], color, width);
+    }
+    if (closed && count > 2)
+        capsule(vertices, points[count - 1], points[0], color, width);
+}
+static void roundedFan(DrawList &d, Rect r, Color color, float radius) {
     if (radius <= 0) {
-        triangle({r.x, r.y}, {r.x + r.w, r.y}, {r.x, r.y + r.h}, color);
-        triangle({r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}, color);
+        solidRect(d, r, color);
         return;
     }
     Vec2 middle{r.x + r.w * .5f, r.y + r.h * .5f};
@@ -149,29 +232,44 @@ void DrawList::rect(Rect r, Color color, float radius) {
                 first = point;
                 begin = false;
             } else
-                triangle(middle, previous, point, color);
+                d.triangle(middle, previous, point, color);
             previous = point;
         }
-    triangle(middle, previous, first, color);
+    d.triangle(middle, previous, first, color);
 }
 void DrawList::line(Vec2 a, Vec2 b, Color color, float width) {
     float dx = b.x - a.x, dy = b.y - a.y, l = std::sqrt(dx * dx + dy * dy);
     if (l < .001f)
         return;
-    Vec2 o{-dy / l * width * .5f, dx / l * width * .5f};
-    Vec2 p{a.x + o.x, a.y + o.y}, q{b.x + o.x, b.y + o.y}, r{b.x - o.x, b.y - o.y}, s{a.x - o.x, a.y - o.y};
-    triangle(p, q, r, color);
-    triangle(p, r, s, color);
+    if (a.x == b.x || a.y == b.y) {
+        // Axis-aligned hairlines stay on the pixel grid instead of softening over two rows.
+        Vec2 o{-dy / l * width * .5f, dx / l * width * .5f};
+        Vec2 p{a.x + o.x, a.y + o.y}, q{b.x + o.x, b.y + o.y}, r{b.x - o.x, b.y - o.y},
+            s{a.x - o.x, a.y - o.y};
+        triangle(p, q, r, color);
+        triangle(p, r, s, color);
+        return;
+    }
+    capsule(vertices, a, b, color, width);
 }
 void DrawList::image(Rect r, Rect uv, Color tint, float radius) {
     if (r.w <= 0 || r.h <= 0) return;
     const auto first = vertices.size();
-    rect(r, tint, radius);
+    // Texture coordinates are derived from positions, so images keep plain geometry.
+    roundedFan(*this, r, tint, std::min({radius, r.w * .5f, r.h * .5f}));
     for (size_t i=first;i<vertices.size();++i) {
         auto &v=vertices[i];
         v.u=-2.f+uv.x+(v.x-r.x)/r.w*uv.w;
         v.v=uv.y+(v.y-r.y)/r.h*uv.h;
     }
+}
+void DrawList::video(Rect r, Rect uv) {
+    const auto first=vertices.size();image(r,uv);
+    for(auto i=first;i<vertices.size();++i)vertices[i].u-=2.f;
+}
+void DrawList::overlay(Rect r, Rect uv) {
+    const auto first=vertices.size();image(r,uv);
+    for(auto i=first;i<vertices.size();++i)vertices[i].u-=4.f;
 }
 float DrawList::textWidth(float size, std::string_view text) const {
     float width = 0;
@@ -219,10 +317,16 @@ void Settings::sanitize() {
     clamp(opacity, .25f, 1.f, .9f);
     clamp(blur, 0, 1, .5f);
     clamp(brightness, .15f, 1, .65f);
+    clamp(environmentDim, 0, 1, 1);
     clamp(handScale, .75f, 1.25f, 1);
     clamp(handPitch, -90, 90, 0);
     theme = Theme(std::clamp(int(theme), 0, 2));
-    background = Background(std::clamp(int(background), 0, 2));
+    background = Background(std::clamp(int(background), 0, 7));
+    virtualBackground = Background(std::clamp(int(virtualBackground), 0, 7));
+    if (virtualBackground == Background::Passthrough)
+        virtualBackground = Background::Studio;
+    if (background != Background::Passthrough)
+        virtualBackground = background;
     handModel = HandModel(std::clamp(int(handModel), 0, 3));
     follow = FollowMode(std::clamp(int(follow), 0, 2));
 }
@@ -252,6 +356,7 @@ void UiModel::log(std::string value) {
     invalidate();
 }
 void UiModel::navigate(Page next) {
+    cancelApplicationSliders();
     page = next;
     modalOpen = false;
     widgets_.clear();
@@ -268,6 +373,7 @@ void UiModel::setToast(std::string value) {
     invalidate();
 }
 void UiModel::setLanguage(std::string_view language) {
+    cancelApplicationSliders();
     settings.language = resolveLocale(language).code;
     saveRequested = true;
     toast_.clear();
@@ -291,10 +397,35 @@ void UiModel::tick(double seconds) {
 void UiModel::addWidget(int id, Rect rect, Control type, bool enabled) {
     widgets_.push_back({id, rect, type, enabled});
 }
+void UiModel::setInterfaceHidden(bool hidden) {
+    if (interfaceHidden == hidden) return;
+    cancelApplicationSliders();
+    interfaceHidden = hidden;
+    widgets_.clear();
+    pointers_ = {};
+    hover_ = 0;
+    hapticRequested[0] = hapticRequested[1] = false;
+    if (!hidden) windowState = WindowState::Open;
+    invalidate();
+}
+bool UiModel::revealInterface() {
+    if (!interfaceHidden) return false;
+    setInterfaceHidden(false);
+    return true;
+}
 void UiModel::pointer(size_t index, Vec2 pos, bool pressed) {
     if (index >= pointers_.size())
         return;
     auto &pointer = pointers_[index];
+    if (interfaceHidden) {
+        if (pressed && !pointer.down) {
+            revealInterface();
+            // Consume the whole waking gesture, including its later release.
+            pointer.down = true;
+            pointer.pos = pos;
+        } else pointer.down = pressed;
+        return;
+    }
     int hit = 0;
     for (const auto &widget : widgets_)
         if (widget.enabled && widget.rect.contains(pos))
@@ -305,34 +436,55 @@ void UiModel::pointer(size_t index, Vec2 pos, bool pressed) {
         hover_ = activeHover;
         invalidate();
     }
-    if (pressed && !pointer.down)
+    const bool began = pressed && !pointer.down;
+    if (began) {
         pointer.capture = hit;
+        if (hit)
+            invalidate(); // Pressed state.
+    }
     if (pressed && pointer.capture && !(pos.x == -100 && pos.y == -100))
         for (const auto &w : widgets_)
-            if (w.id == pointer.capture && w.type == Control::Slider)
-                slide(w.id, (pos.x - w.rect.x) / w.rect.w);
+            if (w.id == pointer.capture && w.enabled && w.type == Control::Slider && (began || pos.x != pointer.pos.x))
+                slide(w.id, (pos.x - w.rect.x) / w.rect.w, began ? SliderPhase::Begin : SliderPhase::Preview);
     if (!pressed && pointer.down) {
-        if (pointer.capture && pointer.capture == hit) {
+        bool sliderHandled = false;
+        if (pointer.capture && handleApplicationSlider) {
+            auto dragged = std::find_if(widgets_.begin(), widgets_.end(),
+                [&](const Widget& w){return w.id == pointer.capture && w.type == Control::Slider;});
+            const bool cancelled = dragged == widgets_.end() || !dragged->enabled ||
+                                   (pos.x == -100 && pos.y == -100);
+            const float fraction = cancelled ? 0.f : std::clamp((pos.x-dragged->rect.x)/dragged->rect.w,0.f,1.f);
+            sliderHandled = handleApplicationSlider(pointer.capture, fraction,
+                cancelled ? SliderPhase::Cancel : SliderPhase::Commit);
+        }
+        if (!sliderHandled && pointer.capture && pointer.capture == hit) {
             action(hit);
             hapticRequested[index] = settings.haptics;
         }
+        if (pointer.capture)
+            invalidate();
         pointer.capture = 0;
+        requestSliderSave();
     }
     pointer.down = pressed;
     pointer.pos = pos;
 }
-void UiModel::slide(int id, float value) {
+void UiModel::slide(int id, float value, SliderPhase phase) {
+    if (presentation == Presentation::Immersive && settings.background == Background::Passthrough &&
+        (id == 351 || id == 352))
+        return;
     value = std::clamp(value, 0.f, 1.f);
+    if (handleApplicationSlider && handleApplicationSlider(id, value, phase)) return;
     if (id == 210)
         exampleValue_ = value;
     else if (id == 310) {
         settings.distance = 1 + value;
         recenterRequested = true;
-        saveRequested = true;
+        sliderUnsaved_ = true;
     } else if (id == 311) {
         settings.scale = .85f + .4f * value;
         recenterRequested = true;
-        saveRequested = true;
+        sliderUnsaved_ = true;
     } else if (id >= 350 && id <= 354) {
         if (id == 350)
             settings.opacity = .25f + value * .75f;
@@ -344,9 +496,42 @@ void UiModel::slide(int id, float value) {
             settings.handScale = .75f + value * .5f;
         if (id == 354)
             settings.handPitch = -90 + value * 180;
-        saveRequested = true;
+        sliderUnsaved_ = true;
     }
     invalidate();
+}
+void UiModel::requestSliderSave() {
+    // Hosts write preferences when polling this flag, so a drag saves once, not every frame.
+    saveRequested = saveRequested || sliderUnsaved_;
+    sliderUnsaved_ = false;
+}
+void UiModel::cancelApplicationSliders() {
+    requestSliderSave();
+    if (handleApplicationSlider)
+        for (const auto& pointer : pointers_)
+            if (pointer.capture)
+                handleApplicationSlider(pointer.capture, 0.f, SliderPhase::Cancel);
+}
+bool UiModel::setAugmentedReality(bool enabled) {
+    if (presentation != Presentation::Immersive)
+        return false;
+    if (enabled && !passthroughAvailable) {
+        notify("toast.passthrough_unavailable");
+        return false;
+    }
+    if (enabled == (settings.background == Background::Passthrough))
+        return true;
+    if (enabled) {
+        settings.virtualBackground = settings.background;
+        settings.background = Background::Passthrough;
+    } else {
+        settings.background = settings.virtualBackground;
+        if (settings.background == Background::Passthrough)
+            settings.background = Background::Studio;
+    }
+    saveRequested = true;
+    invalidate();
+    return true;
 }
 void UiModel::action(int id) {
     if (handleApplicationAction && handleApplicationAction(id))
@@ -355,14 +540,31 @@ void UiModel::action(int id) {
         navigate(Page(id - 1));
         return;
     }
+    if (id >= 430 && id <= 435 && presentation == Presentation::Immersive) {
+        constexpr Background choices[]{Background::Lounge, Background::Observatory, Background::Terrace,
+                                       Background::Studio, Background::Night,       Background::Passthrough};
+        if (choices[id - 430] == Background::Passthrough) {
+            setAugmentedReality(true);
+            return;
+        }
+        settings.background = settings.virtualBackground = choices[id - 430];
+        saveRequested = true;
+        invalidate();
+        return;
+    }
     if ((id >= 340 && id <= 342) || (id >= 360 && id <= 362) || (id >= 370 && id <= 372) ||
         (id >= 380 && id <= 383) || (id >= 390 && id <= 392)) {
         if (id >= 340 && id <= 342)
             settingsTab = id - 340;
         if (id >= 360 && id <= 362)
             settings.theme = Theme(id - 360);
-        if (id >= 370 && id <= 372)
-            settings.background = Background(id - 370);
+        if (id >= 370 && id <= 372) {
+            if (id == 372) {
+                setAugmentedReality(true);
+                return;
+            }
+            settings.background = settings.virtualBackground = Background(id - 370);
+        }
         if (id >= 380 && id <= 383)
             settings.handModel = HandModel(id - 380);
         if (id >= 390 && id <= 392) {
@@ -373,6 +575,9 @@ void UiModel::action(int id) {
         return;
     }
     switch (id) {
+    case 412:
+        setAugmentedReality(settings.background != Background::Passthrough);
+        break;
     case 411:
         if (presentation == Presentation::Immersive)
             panelRequested = true;
@@ -528,7 +733,8 @@ std::string UiModel::diagnosticJson() const {
         << ",\n  \"blur\": " << settings.blur << ",\n  \"followMode\": " << int(settings.follow)
         << ",\n  \"windowState\": " << int(windowState) << ",\n  \"handModel\": " << int(settings.handModel)
         << ",\n  \"passthroughAvailable\": " << (passthroughAvailable ? "true" : "false")
-        << ",\n  \"events\": [";
+        << ",\n  \"passthroughActive\": " << (passthroughActive ? "true" : "false")
+        << ",\n  \"virtualBackground\": " << int(settings.virtualBackground) << ",\n  \"events\": [";
     for (size_t i = 0; i < logs.size(); i++) {
         if (i)
             out << ',';

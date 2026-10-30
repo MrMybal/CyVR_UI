@@ -5,6 +5,8 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #endif
 #include "cyvr/core.hpp"
+#include "cyvr/pbr.hpp"
+#include "cyvr/scene.hpp"
 #include "cyvr/spatial.hpp"
 #include <functional>
 #include <stdexcept>
@@ -42,7 +44,7 @@ struct Target {
     uint32_t width{}, height{};
 };
 struct EnvironmentView {
-    std::array<float, 4> origin{}, forward{0, 0, -1, 0}, right{1, 0, 0, 0}, up{0, 1, 0, 0};
+    std::array<float, 4> origin{0,0,0,1}, forward{0, 0, -1, 0}, right{1, 0, 0, 0}, up{0, 1, 0, 0};
     // background, brightness, blur angular radius, alpha; then mask aspect/radius/panel.
     std::array<float, 4> options{0, .65f, 0, 1}, shape{};
 };
@@ -56,12 +58,29 @@ class VulkanRenderer {
     VulkanRenderer(const VulkanRenderer &) = delete;
     VulkanRenderer &operator=(const VulkanRenderer &) = delete;
     void initialize(VkFormat format, const AssetReader &read);
+    VkFormat colorFormat() const { return format_; }
+    // Optional photographic environments; missing assets retain the procedural fallback.
+    void loadEnvironments(const AssetReader &read);
+    bool photographicEnvironments() const { return sceneMask_ == 3; }
+    // Upload original 3D geometry only when the selected scene changes. Anchor is floor-relative.
+    void setScene(Background background, Pose anchor = {}, const AssetReader &read = {});
+    uint32_t sceneVertexCount() const { return sceneVertexCount_; }
+    size_t sceneTextureBytes() const { return pbrBytes_; }
+    bool bakedSceneLighting() const { return bakedSceneLighting_; }
     void uploadImages(uint32_t width, uint32_t height, const std::vector<uint8_t> &rgba);
+    // Borrowed texture; retain it until all draw() calls using it have completed.
+    // Null handles restore the owned image atlas. No upload or CPU readback.
+    void setImageTexture(VkImageView view = VK_NULL_HANDLE, VkSampler sampler = VK_NULL_HANDLE);
+    void setVideoTexture(VkImageView view = VK_NULL_HANDLE, VkSampler sampler = VK_NULL_HANDLE);
+    void setOverlayTexture(VkImageView view = VK_NULL_HANDLE, VkSampler sampler = VK_NULL_HANDLE);
+    void useImageAtlasForVideo() { setVideoTexture(images_.view, sampler_); }
+    VkImageView imageAtlasView() const { return images_.view; }
+    VkSampler imageSampler() const { return sampler_; }
     Target createTarget(uint32_t width, uint32_t height, VkImage external = VK_NULL_HANDLE,
-                        bool depth = false);
+                        bool depth = false, VkImage externalDepth = VK_NULL_HANDLE);
     void destroyTarget(Target &target);
     void draw(const Target &target, const DrawList &commands, const EnvironmentView *glass = nullptr,
-              bool present=false);
+              bool present=false, Vec2 logicalSize = {});
     void drawSpatial(const Target &target, const SpatialMesh &mesh, const Mat4 &matrix,
                      const EnvironmentView *environment = nullptr);
     std::vector<uint8_t> readback(const Target &target);
@@ -77,10 +96,25 @@ class VulkanRenderer {
     VkBuffer vertexBuffer_{};
     VkDeviceMemory vertexMemory_{};
     void *vertices_{};
-    Target atlas_, glass_, images_;
-    VkSampler sampler_{};
+    Target atlas_, glass_, images_, scenes_[2], sceneGlass_;
+    VkImageView videoView_{}, overlayView_{}; // Current bindings 3 and 4.
+    VkSampler videoSampler_{}, overlaySampler_{};
+    Target materialColor_, materialSurface_, probe_, brdf_;
+    VkSampler materialSampler_{}, probeSampler_{};
+    size_t pbrBytes_{}, probeBytes_{};
+    bool bakedSceneLighting_{};
+    VkBuffer sceneBuffer_{};
+    VkDeviceMemory sceneMemory_{};
+    uint32_t sceneVertexCount_{}, sceneClosedVertexCount_{};
+    Background sceneKind_{Background::Passthrough};
+    Pose sceneAnchor_{};
+    VkSampler sampler_{}, sceneSampler_{};
+    uint32_t sceneMask_{};
+    void uploadPanorama(Target &target, const std::vector<uint8_t> &jpeg);
+    void uploadPbr(Target &target, const PbrTexture &texture, uint32_t binding);
+    void loadPbr(Background background, const AssetReader &read);
     VkRenderPass renderPass_{};
-    VkRenderPass spatialPass_{};
+    VkRenderPass spatialPass_{}, spatialDiscardPass_{}; // Discard: depth not read after the pass.
     VkDescriptorSetLayout setLayout_{};
     VkDescriptorPool descriptorPool_{};
     VkDescriptorSet descriptor_{};
@@ -88,12 +122,16 @@ class VulkanRenderer {
     VkPipeline pipeline_{};
     VkPipelineLayout spatialLayout_{};
     VkPipeline spatialPipeline_{};
+    VkPipeline scenePipeline_{}, sceneOpenPipeline_{}, sceneBlurPipeline_{};
+    VkPipelineLayout sceneLayout_{};
     VkPipelineLayout environmentLayout_{};
     VkPipeline environmentPipeline_{}, spatialEnvironmentPipeline_{}, glassPipeline_{};
     static constexpr size_t maxVertices = 180000;
     void environment(const Target &target, const EnvironmentView &view, bool spatial);
+    void drawScene(const Mat4 &matrix, const EnvironmentView &view);
     void buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer &buffer, VkDeviceMemory &memory);
-    void image(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Target &target);
+    void image(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Target &target,
+               uint32_t levels = 1, uint32_t layers = 1, bool cube = false);
     void begin();
     void submit();
 };

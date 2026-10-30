@@ -3,6 +3,7 @@
 #include "cyvr/core.hpp"
 namespace cyvr {
 using Mat4 = std::array<float, 16>;
+inline constexpr float spatialNearZ = .04f, spatialFarZ = 32.f;
 Mat4 viewProjection(Pose view, float left, float right, float up, float down);
 struct SpatialVertex {
     float x, y, z, r, g, b, a, nx, ny, nz;

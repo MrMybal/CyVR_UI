@@ -24,7 +24,7 @@ def run(*args):
 
 def notices(destination):
     destination.mkdir(parents=True, exist_ok=True)
-    sources = {"CyVR-MIT.txt": ROOT / "LICENSE", "Apache-2.0.txt": ROOT / "third_party/Apache-2.0.txt", "OpenXR.txt": ROOT / "third_party/openxr/LICENSE", "Noto-OFL.txt": ROOT / "assets/fonts/OFL.txt", "THIRD_PARTY.md": ROOT / "THIRD_PARTY.md"}
+    sources = {"CyVR-MIT.txt": ROOT / "LICENSE", "Apache-2.0.txt": ROOT / "third_party/Apache-2.0.txt", "OpenXR.txt": ROOT / "third_party/openxr/LICENSE", "Noto-OFL.txt": ROOT / "assets/fonts/OFL.txt", "THIRD_PARTY.md": ROOT / "THIRD_PARTY.md", "stb-image-MIT.txt": ROOT / "third_party/stb/LICENSE"}
     for name, source in sources.items():
         shutil.copy2(source, destination / name)
     for source in (ROOT / "third_party/notices").glob("*"):
@@ -72,6 +72,9 @@ def android(immersive=True):
         tree = ET.parse(source_manifest)
         document = tree.getroot()
         ns = "{http://schemas.android.com/apk/res/android}"
+        for feature in document.findall("uses-feature"):
+            if feature.get(ns + "name") == "android.hardware.vr.headtracking":
+                feature.set(ns + "required", "false")
         application = document.find("application")
         for activity in list(application.findall("activity")):
             if activity.get(ns + "name") == ".ImmersiveActivity":
@@ -124,6 +127,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-immersive", action="store_true", help="Build a native 2D APK without OpenXR")
     args = parser.parse_args()
     run("python",ROOT/"tools/generate_locales.py")
+    if not args.no_immersive:
+        run("python", ROOT / "tools/prepare_pbr.py", "--check")
     if not args.no_immersive:
         ensure_dependencies()
     if args.target in ("all", "windows", "tests"):

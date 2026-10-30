@@ -32,6 +32,10 @@ Get-PinnedFile 'https://www.apache.org/licenses/LICENSE-2.0.txt' (Join-Path $pro
 Get-PinnedFile "$xrBase/src/external/jsoncpp/LICENSE" (Join-Path $projectRoot 'third_party/notices/jsoncpp-LICENSE.txt')
 Get-PinnedFile "$xrBase/src/external/jnipp/LICENSE" (Join-Path $projectRoot 'third_party/notices/jnipp-LICENSE.txt')
 Get-PinnedFile 'https://www.boost.org/LICENSE_1_0.txt' (Join-Path $projectRoot 'third_party/notices/BSL-1.0.txt')
+$stbBase = 'https://raw.githubusercontent.com/nothings/stb/013ac3beddff3dbffafd5177e7972067cd2b5083'
+Get-PinnedFile "$stbBase/stb_image.h" (Join-Path $projectRoot 'third_party/stb/stb_image.h')
+Get-PinnedFile "$stbBase/LICENSE" (Join-Path $projectRoot 'third_party/stb/LICENSE')
+Get-PinnedFile 'https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt' (Join-Path $projectRoot 'third_party/notices/CC0-1.0.txt')
 # Noto Sans is redistributed under SIL OFL 1.1; the source font remains in the repository.
 Get-PinnedFile 'https://raw.githubusercontent.com/notofonts/noto-fonts/v20201206-phase3/hinted/ttf/NotoSans/NotoSans-Regular.ttf' (Join-Path $projectRoot 'assets/fonts/NotoSans-Regular.ttf')
 Get-PinnedFile 'https://raw.githubusercontent.com/notofonts/noto-fonts/v20201206-phase3/LICENSE' (Join-Path $projectRoot 'assets/fonts/OFL.txt')

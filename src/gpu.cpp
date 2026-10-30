@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 #include "cyvr/gpu.hpp"
+#include "cyvr/scene_lighting.hpp"
+#include <cstddef>
 #include <cstring>
+#include <memory>
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_NO_STDIO
+#define STBI_MAX_DIMENSIONS 4096
+#include <stb_image.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -15,6 +23,7 @@ EnvironmentView environmentView(Pose eye, float left, float right, float up, flo
     auto vector = [](Vec3 v) { return std::array<float, 4>{v.x, v.y, v.z, 0}; };
     float l = std::tan(left), r = std::tan(right), u = std::tan(up), d = std::tan(down);
     e.origin = vector(eye.position);
+    e.origin[3] = s.environmentDim;
     e.forward = vector(rotate(eye.orientation, {(r + l) * .5f, (u + d) * .5f, -1}));
     e.right = vector(rotate(eye.orientation, {(r - l) * .5f, 0, 0}));
     e.up = vector(rotate(eye.orientation, {0, (u - d) * .5f, 0}));
@@ -25,6 +34,7 @@ EnvironmentView glassView(Pose eye, const PanelGeometry &p, const Settings &s) {
     auto vector = [](Vec3 v) { return std::array<float, 4>{v.x, v.y, v.z, 0}; };
     EnvironmentView e;
     e.origin = vector(eye.position);
+    e.origin[3] = s.environmentDim;
     e.forward = vector(p.pose.position - eye.position);
     e.right = vector(rotate(p.pose.orientation, {p.width * .5f, 0, 0}));
     e.up = vector(rotate(p.pose.orientation, {0, p.height * .5f, 0}));
@@ -133,15 +143,17 @@ void VulkanRenderer::buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffe
     vkCheck(vkAllocateMemory(ctx_.device, &alloc, nullptr, &memory), "allocate buffer");
     vkCheck(vkBindBufferMemory(ctx_.device, out, memory, 0), "bind buffer");
 }
-void VulkanRenderer::image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage, Target &t) {
+void VulkanRenderer::image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage, Target &t,
+                           uint32_t levels, uint32_t layers, bool cube) {
     t.width = w;
     t.height = h;
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = format;
     info.extent = {w, h, 1};
-    info.mipLevels = 1;
-    info.arrayLayers = 1;
+    info.mipLevels = levels;
+    info.arrayLayers = layers;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = usage;
@@ -240,13 +252,15 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     binding.descriptorCount = 1;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo set{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    VkDescriptorSetLayoutBinding bindings[]{binding, binding, binding};
-    bindings[1].binding = 1;
-    bindings[2].binding = 2;
-    set.bindingCount = 3;
+    VkDescriptorSetLayoutBinding bindings[12];
+    for (uint32_t i = 0; i < 12; ++i) {
+        bindings[i] = binding;
+        bindings[i].binding = i;
+    }
+    set.bindingCount = 12;
     set.pBindings = bindings;
     vkCheck(vkCreateDescriptorSetLayout(ctx_.device, &set, nullptr, &setLayout_), "descriptor layout");
-    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12};
     VkDescriptorPoolCreateInfo descriptors{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     descriptors.maxSets = 1;
     descriptors.poolSizeCount = 1;
@@ -265,6 +279,8 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     write.pImageInfo = &texture;
     vkUpdateDescriptorSets(ctx_.device, 1, &write, 0, nullptr);
     uploadImages(1,1,{255,255,255,255});
+    setVideoTexture();
+    setOverlayTexture();
     VkAttachmentDescription attachment{};
     attachment.format = format;
     attachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -293,6 +309,13 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     pass.dependencyCount = 1;
     pass.pDependencies = &dependency;
     vkCheck(vkCreateRenderPass(ctx_.device, &pass, nullptr, &renderPass_), "render pass");
+    for (uint32_t binding : {5u, 6u, 7u}) {
+        VkDescriptorImageInfo fallback{sampler_, atlas_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = descriptor_; write.dstBinding = binding; write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &fallback;
+        vkUpdateDescriptorSets(ctx_.device, 1, &write, 0, nullptr);
+    }
     VkFormatProperties depthProperties{};
     vkGetPhysicalDeviceFormatProperties(ctx_.physical, depthFormat_, &depthProperties);
     if (!(depthProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
@@ -302,7 +325,7 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     depth.format = depthFormat_;
     depth.samples = VK_SAMPLE_COUNT_1_BIT;
     depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -316,6 +339,9 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     dependency.dstStageMask = dependency.srcStageMask;
     dependency.dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     vkCheck(vkCreateRenderPass(ctx_.device, &pass, nullptr, &spatialPass_), "spatial depth pass");
+    // Only depth handed to the compositor outlives its pass. Tiled GPUs then skip writing it back.
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    vkCheck(vkCreateRenderPass(ctx_.device, &pass, nullptr, &spatialDiscardPass_), "discarded depth pass");
     auto shader = [&](const char *name) {
         auto bytes = read(name);
         if (bytes.empty() || bytes.size() % 4)
@@ -339,9 +365,9 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     stages[1].module = frag;
     stages[1].pName = "main";
     VkVertexInputBindingDescription vertexBinding{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-                                                 {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},
-                                                 {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}};
+    VkVertexInputAttributeDescription attrs[7] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+                                                  {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},
+                                                  {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}};
     VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex.vertexBindingDescriptionCount = 1;
     vertex.pVertexBindingDescriptions = &vertexBinding;
@@ -427,6 +453,31 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     vkDestroyShaderModule(ctx_.device, vert, nullptr);
     vkDestroyShaderModule(ctx_.device, frag, nullptr);
     vkCheck(result, "spatial pipeline");
+    vert = shader("scene.vert.spv");
+    frag = shader("scene.frag.spv");
+    stages[0].module = vert;
+    stages[1].module = frag;
+    VkPushConstantRange scenePush{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96};
+    layout.pPushConstantRanges = &scenePush;
+    layout.setLayoutCount = 1;
+    layout.pSetLayouts = &setLayout_;
+    vkCheck(vkCreatePipelineLayout(ctx_.device, &layout, nullptr, &sceneLayout_), "scene layout");
+    vertexBinding.stride = sizeof(SceneVertex);
+    attrs[3] = {3, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(SceneVertex, material))};
+    attrs[4] = {4, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(SceneVertex, uv))};
+    attrs[5] = {5, 0, VK_FORMAT_R32G32B32_SFLOAT, uint32_t(offsetof(SceneVertex, tangent))};
+    attrs[6] = {6, 0, VK_FORMAT_R32G32B32_SFLOAT, uint32_t(offsetof(SceneVertex, indirect))};
+    vertex.vertexAttributeDescriptionCount = 7;
+    pipeline.layout = sceneLayout_;
+    blend.blendEnable = VK_FALSE;
+    raster.cullMode = VK_CULL_MODE_BACK_BIT;
+    result = vkCreateGraphicsPipelines(ctx_.device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &scenePipeline_);
+    raster.cullMode = VK_CULL_MODE_NONE;
+    if (result == VK_SUCCESS)
+        result = vkCreateGraphicsPipelines(ctx_.device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &sceneOpenPipeline_);
+    vkDestroyShaderModule(ctx_.device, vert, nullptr);
+    vkDestroyShaderModule(ctx_.device, frag, nullptr);
+    vkCheck(result, "static scene pipeline");
     vert = shader("environment.vert.spv");
     frag = shader("environment.frag.spv");
     stages[0].module = vert;
@@ -438,12 +489,13 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     vkCheck(vkCreatePipelineLayout(ctx_.device, &layout, nullptr, &environmentLayout_), "environment layout");
     vertex.vertexBindingDescriptionCount = 0;
     vertex.vertexAttributeDescriptionCount = 0;
-    depthState.depthTestEnable = VK_FALSE;
+    // Drawn after opaque scenes at the far plane, so covered pixels never run the sky shader.
     depthState.depthWriteEnable = VK_FALSE;
     pipeline.layout = environmentLayout_;
     result = vkCreateGraphicsPipelines(ctx_.device, VK_NULL_HANDLE, 1, &pipeline, nullptr,
                                        &spatialEnvironmentPipeline_);
     vkCheck(result, "spatial environment pipeline");
+    blend.blendEnable = VK_TRUE;
     pipeline.renderPass = renderPass_;
     pipeline.pDepthStencilState = nullptr;
     result =
@@ -455,9 +507,15 @@ void VulkanRenderer::initialize(VkFormat format, const AssetReader &read) {
     // Both full-screen pipelines share the environment constants; the glass pass also samples a texture.
     pipeline.layout = environmentLayout_;
     result = vkCreateGraphicsPipelines(ctx_.device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &glassPipeline_);
-    vkDestroyShaderModule(ctx_.device, vert, nullptr);
     vkDestroyShaderModule(ctx_.device, frag, nullptr);
     vkCheck(result, "glass sampling pipeline");
+    frag = shader("scene_blur.frag.spv");
+    stages[1].module = frag;
+    result =
+        vkCreateGraphicsPipelines(ctx_.device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &sceneBlurPipeline_);
+    vkDestroyShaderModule(ctx_.device, frag, nullptr);
+    vkDestroyShaderModule(ctx_.device, vert, nullptr);
+    vkCheck(result, "scene blur pipeline");
     glass_ = createTarget(480, 330);
     VkDescriptorImageInfo glassTexture{sampler_, glass_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     write.dstBinding = 1;
@@ -468,6 +526,7 @@ void VulkanRenderer::uploadImages(uint32_t width, uint32_t height, const std::ve
     if (!width || !height || width>2048 || height>2048 || rgba.size()!=size_t(width)*height*4)
         throw std::runtime_error("Invalid application image atlas");
     vkCheck(vkDeviceWaitIdle(ctx_.device), "wait image atlas upload");
+    const VkImageView replaced = images_.view;
     destroyTarget(images_);
     image(width,height,VK_FORMAT_R8G8B8A8_SRGB,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,images_);
     VkBuffer staging{};
@@ -512,8 +571,304 @@ void VulkanRenderer::uploadImages(uint32_t width, uint32_t height, const std::ve
     write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo=&texture;
     vkUpdateDescriptorSets(ctx_.device,1,&write,0,nullptr);
+    // ui.frag statically uses every binding, so none may keep the destroyed view.
+    if (videoView_ == replaced)
+        setVideoTexture(images_.view, videoSampler_);
+    if (overlayView_ == replaced)
+        setOverlayTexture(images_.view, overlaySampler_);
 }
-Target VulkanRenderer::createTarget(uint32_t w, uint32_t h, VkImage external, bool depth) {
+void VulkanRenderer::uploadPanorama(Target &target, const std::vector<uint8_t> &jpeg) {
+    int width{}, height{}, channels{};
+    std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> pixels(
+        stbi_load_from_memory(jpeg.data(), int(jpeg.size()), &width, &height, &channels, 4), stbi_image_free);
+    if (!pixels || width != height * 2 || width > 4096 || width < 2)
+        throw std::runtime_error("Invalid bundled environment JPEG");
+    const size_t bytes = size_t(width) * height * 4;
+    image(width, height, VK_FORMAT_R8G8B8A8_SRGB,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, target);
+    VkBuffer staging{}; VkDeviceMemory memory{};
+    buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging, memory);
+    void *mapped{};
+    vkCheck(vkMapMemory(ctx_.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "map environment upload");
+    std::memcpy(mapped, pixels.get(), bytes);
+    vkUnmapMemory(ctx_.device, memory);
+    pixels.reset();
+    begin();
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {uint32_t(width), uint32_t(height), 1};
+    vkCmdCopyBufferToImage(command_, staging, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    submit();
+    vkDestroyBuffer(ctx_.device, staging, nullptr); vkFreeMemory(ctx_.device, memory, nullptr);
+    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view.image = target.image; view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view.format = VK_FORMAT_R8G8B8A8_SRGB;
+    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCheck(vkCreateImageView(ctx_.device, &view, nullptr, &target.view), "environment image view");
+}
+void VulkanRenderer::loadEnvironments(const AssetReader &read) {
+    if (sceneMask_ == 3) return;
+    if (!sceneSampler_) {
+        VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        info.magFilter = info.minFilter = VK_FILTER_LINEAR;
+        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCheck(vkCreateSampler(ctx_.device, &info, nullptr, &sceneSampler_), "environment sampler");
+    }
+    const char *files[]{"scenes/lebombo.jpg", "scenes/venice_sunset.jpg"};
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (sceneMask_ & (1u << i)) continue;
+        std::vector<uint8_t> jpeg;
+        try { jpeg = read(files[i]); } catch (const std::exception &) { continue; }
+        if (jpeg.empty()) continue;
+        uploadPanorama(scenes_[i], jpeg);
+        VkDescriptorImageInfo texture{sceneSampler_, scenes_[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = descriptor_; write.dstBinding = 5 + i; write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &texture;
+        vkUpdateDescriptorSets(ctx_.device, 1, &write, 0, nullptr);
+        sceneMask_ |= 1u << i;
+    }
+}
+void VulkanRenderer::uploadPbr(Target &target, const PbrTexture &t, uint32_t binding) {
+    VkFormat format = t.format == PbrFormat::SRGBA8    ? VK_FORMAT_R8G8B8A8_SRGB
+                      : t.format == PbrFormat::RGBA8   ? VK_FORMAT_R8G8B8A8_UNORM
+                      : t.format == PbrFormat::RGBA16F ? VK_FORMAT_R16G16B16A16_SFLOAT
+                                                       : VK_FORMAT_R16G16_SFLOAT;
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(ctx_.physical, format, &properties);
+    constexpr auto required =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    if ((properties.optimalTilingFeatures & required) != required)
+        throw std::runtime_error("PBR sampled texture format unavailable");
+    destroyTarget(target);
+    image(t.width, t.height, format, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, target,
+          t.levels, t.layers, t.cube);
+    VkBuffer staging{};
+    VkDeviceMemory memory{};
+    buffer(t.pixels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging, memory);
+    void *mapped{};
+    vkCheck(vkMapMemory(ctx_.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "map PBR upload");
+    std::memcpy(mapped, t.pixels.data(), t.pixels.size());
+    vkUnmapMemory(ctx_.device, memory);
+    std::vector<VkBufferImageCopy> copies;
+    VkDeviceSize offset{};
+    for (uint32_t level = 0; level < t.levels; ++level) {
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = offset;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, t.layers};
+        copy.imageExtent = {std::max(1u, t.width >> level), std::max(1u, t.height >> level), 1};
+        copies.push_back(copy);
+        offset += t.levelBytes(level);
+    }
+    begin();
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t.levels, 0, t.layers};
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &barrier);
+    vkCmdCopyBufferToImage(command_, staging, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           uint32_t(copies.size()), copies.data());
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &barrier);
+    submit();
+    vkDestroyBuffer(ctx_.device, staging, nullptr);
+    vkFreeMemory(ctx_.device, memory, nullptr);
+    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view.image = target.image;
+    view.viewType = t.cube         ? VK_IMAGE_VIEW_TYPE_CUBE
+                    : t.layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                   : VK_IMAGE_VIEW_TYPE_2D;
+    view.format = format;
+    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t.levels, 0, t.layers};
+    vkCheck(vkCreateImageView(ctx_.device, &view, nullptr, &target.view), "PBR texture view");
+    VkDescriptorImageInfo texture{binding < 10 ? materialSampler_ : probeSampler_, target.view,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptor_;
+    write.dstBinding = binding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &texture;
+    vkUpdateDescriptorSets(ctx_.device, 1, &write, 0, nullptr);
+}
+void VulkanRenderer::loadPbr(Background background, const AssetReader &read) {
+    vkCheck(vkDeviceWaitIdle(ctx_.device), "wait PBR selection");
+    auto load = [&](const char *name, PbrTexture fallback) {
+        std::vector<uint8_t> bytes;
+        if (read) {
+            try {
+                bytes = read(std::string("pbr/") + name);
+            } catch (const std::exception &) {
+                return fallback;
+            }
+        }
+        return bytes.empty() ? fallback : decodePbrTexture(bytes);
+    };
+    if (!materialSampler_) {
+        VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
+        sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler.maxLod = 8;
+        vkCheck(vkCreateSampler(ctx_.device, &sampler, nullptr, &materialSampler_), "PBR material sampler");
+        sampler.addressModeU = sampler.addressModeV = sampler.addressModeW =
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCheck(vkCreateSampler(ctx_.device, &sampler, nullptr, &probeSampler_), "PBR probe sampler");
+    }
+    if (!materialColor_.image) {
+        auto color = load("basecolor.bin", fallbackMaterial(false));
+        auto surface = load("normal-rough-metal.bin", fallbackMaterial(true));
+        auto brdf = load("brdf.bin", fallbackBrdf());
+        if (color.layers != 9 || surface.layers != 9 || color.cube || surface.cube || brdf.cube ||
+            brdf.layers != 1 || color.format != PbrFormat::SRGBA8 || surface.format != PbrFormat::RGBA8)
+            throw std::runtime_error("Invalid PBR material array or integration table");
+        uploadPbr(materialColor_, color, 8);
+        uploadPbr(materialSurface_, surface, 9);
+        uploadPbr(brdf_, brdf, 11);
+        pbrBytes_ = color.pixels.size() + surface.pixels.size() + brdf.pixels.size();
+    }
+    const char *name = background == Background::Lounge        ? "lounge.bin"
+                       : background == Background::Observatory ? "observatory.bin"
+                                                               : "terrace.bin";
+    auto probe = load(name, fallbackProbe(background));
+    if (!probe.cube)
+        throw std::runtime_error("PBR lighting probe must be a cube map");
+    uploadPbr(probe_, probe, 10);
+    pbrBytes_ -= probeBytes_;
+    probeBytes_ = probe.pixels.size();
+    pbrBytes_ += probeBytes_;
+}
+void VulkanRenderer::setScene(Background background, Pose anchor, const AssetReader &read) {
+    sceneAnchor_ = anchor;
+    if (!isScene3D(background) || (sceneKind_ == background && sceneVertexCount_))
+        return;
+    loadPbr(background, read);
+    auto mesh = buildScene(background, false);
+    std::vector<uint8_t> lighting;
+    if (read) {
+        const char *name = background == Background::Lounge        ? "pbr/lighting-lounge.bin"
+                           : background == Background::Observatory ? "pbr/lighting-observatory.bin"
+                                                                   : "pbr/lighting-terrace.bin";
+        try {
+            lighting = read(name);
+        } catch (const std::exception &) {
+        }
+    }
+    bakedSceneLighting_ = !lighting.empty();
+    if (bakedSceneLighting_)
+        applySceneLighting(mesh, background, lighting);
+    else
+        mesh = buildScene(background);
+    if (mesh.vertices.empty())
+        throw std::runtime_error("Empty 3D environment");
+    sceneClosedVertexCount_ = moveOpenTrianglesLast(mesh);
+    if (sceneBuffer_)
+        vkDestroyBuffer(ctx_.device, sceneBuffer_, nullptr);
+    if (sceneMemory_)
+        vkFreeMemory(ctx_.device, sceneMemory_, nullptr);
+    sceneBuffer_ = {};
+    sceneMemory_ = {};
+    sceneVertexCount_ = 0;
+    size_t bytes = mesh.vertices.size() * sizeof(SceneVertex);
+    buffer(bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sceneBuffer_, sceneMemory_);
+    void *mapped{};
+    vkCheck(vkMapMemory(ctx_.device, sceneMemory_, 0, VK_WHOLE_SIZE, 0, &mapped), "map static scene");
+    std::memcpy(mapped, mesh.vertices.data(), bytes);
+    vkUnmapMemory(ctx_.device, sceneMemory_);
+    sceneVertexCount_ = uint32_t(mesh.vertices.size());
+    sceneKind_ = background;
+    if (!sceneGlass_.image) {
+        sceneGlass_ = createTarget(480, 330, VK_NULL_HANDLE, true);
+        VkDescriptorImageInfo texture{sampler_, sceneGlass_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = descriptor_;
+        write.dstBinding = 7;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &texture;
+        vkUpdateDescriptorSets(ctx_.device, 1, &write, 0, nullptr);
+    }
+}
+void VulkanRenderer::drawScene(const Mat4 &matrix, const EnvironmentView &view) {
+    struct Push {
+        Mat4 matrix;
+        std::array<float, 4> eye, lighting;
+    };
+    static_assert(sizeof(Push) == 96 && sizeof(SceneVertex) == 80);
+    auto eye = relativePose(sceneAnchor_, {{view.origin[0], view.origin[1], view.origin[2]}, {}}).position;
+    int kind = int(sceneKind_);
+    Push push{modelProjection(matrix, sceneAnchor_),
+              {eye.x, eye.y, eye.z, std::exp2((view.options[1] - .65f) * 2.5f) * view.origin[3]},
+              {-.5f,
+               kind == 4   ? .35f
+               : kind == 5 ? .30f
+                           : .65f,
+               kind == 4 ? .7f : -.7f, float(kind)}};
+    vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipeline_);
+    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneLayout_, 0, 1, &descriptor_, 0,
+                            nullptr);
+    VkDeviceSize offset{};
+    vkCmdBindVertexBuffers(command_, 0, 1, &sceneBuffer_, &offset);
+    vkCmdPushConstants(command_, sceneLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(push), &push);
+    vkCmdDraw(command_, sceneClosedVertexCount_, 1, 0, 0);
+    if (sceneVertexCount_ > sceneClosedVertexCount_) {
+        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneOpenPipeline_);
+        vkCmdDraw(command_, sceneVertexCount_ - sceneClosedVertexCount_, 1, sceneClosedVertexCount_, 0);
+    }
+}
+void VulkanRenderer::setImageTexture(VkImageView view, VkSampler sampler) {
+    VkDescriptorImageInfo texture{sampler ? sampler : sampler_, view ? view : images_.view,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet=descriptor_;write.dstBinding=2;write.descriptorCount=1;
+    write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&texture;
+    vkUpdateDescriptorSets(ctx_.device,1,&write,0,nullptr);
+}
+void VulkanRenderer::setVideoTexture(VkImageView view, VkSampler sampler) {
+    videoView_ = view ? view : atlas_.view;
+    videoSampler_ = sampler ? sampler : sampler_;
+    VkDescriptorImageInfo texture{videoSampler_, videoView_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet=descriptor_;write.dstBinding=3;write.descriptorCount=1;
+    write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&texture;
+    vkUpdateDescriptorSets(ctx_.device,1,&write,0,nullptr);
+}
+void VulkanRenderer::setOverlayTexture(VkImageView view, VkSampler sampler) {
+    overlayView_ = view ? view : images_.view;
+    overlaySampler_ = sampler ? sampler : sampler_;
+    VkDescriptorImageInfo texture{overlaySampler_, overlayView_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet=descriptor_;write.dstBinding=4;write.descriptorCount=1;
+    write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&texture;
+    vkUpdateDescriptorSets(ctx_.device,1,&write,0,nullptr);
+}
+Target VulkanRenderer::createTarget(uint32_t w, uint32_t h, VkImage external, bool depth, VkImage externalDepth) {
     Target t{};
     t.width = w;
     t.height = h;
@@ -535,11 +890,14 @@ Target VulkanRenderer::createTarget(uint32_t w, uint32_t h, VkImage external, bo
     frame.attachmentCount = 1;
     VkImageView attachments[]{t.view, VK_NULL_HANDLE};
     if (depth) {
-        Target z;
-        image(w, h, depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, z);
-        t.depthImage = z.image;
-        t.depthMemory = z.memory;
-        view.image = z.image;
+        if (externalDepth) t.depthImage = externalDepth;
+        else {
+            Target z;
+            image(w, h, depthFormat_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, z);
+            t.depthImage = z.image;
+            t.depthMemory = z.memory;
+        }
+        view.image = t.depthImage;
         view.format = depthFormat_;
         view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         vkCheck(vkCreateImageView(ctx_.device, &view, nullptr, &t.depthView), "depth view");
@@ -561,23 +919,48 @@ void VulkanRenderer::destroyTarget(Target &t) {
         vkDestroyImageView(ctx_.device, t.view, nullptr);
     if (t.depthView)
         vkDestroyImageView(ctx_.device, t.depthView, nullptr);
-    if (t.depthImage)
+    if (t.depthMemory) {
         vkDestroyImage(ctx_.device, t.depthImage, nullptr);
-    if (t.depthMemory)
         vkFreeMemory(ctx_.device, t.depthMemory, nullptr);
+    }
     if (t.memory) {
         vkDestroyImage(ctx_.device, t.image, nullptr);
         vkFreeMemory(ctx_.device, t.memory, nullptr);
     }
     t = {};
 }
-void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentView *glass, bool present) {
+void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentView *glass, bool present,
+                         Vec2 logicalSize) {
     if (d.vertices.size() > maxVertices)
         throw std::runtime_error("UI vertex budget exceeded");
+    bool sceneBackdrop = glass && sceneVertexCount_ && sceneKind_ == Background(int(glass->options[0]));
+    if (sceneBackdrop && glass->options[3] > 0) {
+        auto xyz = [](const std::array<float, 4> &a) { return Vec3{a[0], a[1], a[2]}; };
+        auto projection =
+            rectangleProjection(xyz(glass->origin), xyz(glass->forward), xyz(glass->right), xyz(glass->up));
+        auto view = *glass;
+        view.options[2] = 0;
+        view.options[3] = 1;
+        view.shape[2] = 0;
+        drawSpatial(sceneGlass_, {}, projection, &view);
+    }
     std::memcpy(vertices_, d.vertices.data(), d.vertices.size() * sizeof(Vertex));
     lastVertexCount = uint32_t(d.vertices.size());
     begin();
     if (glass && glass->options[3] > 0) {
+        if (sceneBackdrop) {
+            VkImageMemoryBarrier source{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            source.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            source.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            source.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            source.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            source.srcQueueFamilyIndex = source.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source.image = sceneGlass_.image;
+            source.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &source);
+        }
         VkClearValue transparent{};
         VkRenderPassBeginInfo blurPass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         blurPass.renderPass = renderPass_;
@@ -588,7 +971,19 @@ void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentV
         vkCmdBeginRenderPass(command_, &blurPass, VK_SUBPASS_CONTENTS_INLINE);
         EnvironmentView blur = *glass;
         blur.shape[2] = 0;
-        environment(glass_, blur, false);
+        if (sceneBackdrop) {
+            vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneBlurPipeline_);
+            vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, environmentLayout_, 0, 1,
+                                    &descriptor_, 0, nullptr);
+            vkCmdPushConstants(command_, environmentLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(blur),
+                               &blur);
+            VkViewport viewport{0, 0, float(glass_.width), float(glass_.height), 0, 1};
+            VkRect2D scissor{{0, 0}, {glass_.width, glass_.height}};
+            vkCmdSetViewport(command_, 0, 1, &viewport);
+            vkCmdSetScissor(command_, 0, 1, &scissor);
+            vkCmdDraw(command_, 3, 1, 0, 0);
+        } else
+            environment(glass_, blur, false);
         vkCmdEndRenderPass(command_);
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -630,7 +1025,8 @@ void VulkanRenderer::draw(const Target &t, const DrawList &d, const EnvironmentV
     vkCmdBindVertexBuffers(command_, 0, 1, &vertexBuffer_, &offset);
     vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptor_, 0,
                             nullptr);
-    float size[] = {float(t.width), float(t.height)};
+    float size[] = {logicalSize.x>0 ? logicalSize.x : float(t.width),
+                    logicalSize.y>0 ? logicalSize.y : float(t.height)};
     vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(size), size);
     vkCmdDraw(command_, lastVertexCount, 1, 0, 0);
     vkCmdEndRenderPass(command_);
@@ -692,7 +1088,22 @@ void VulkanRenderer::environment(const Target &t, const EnvironmentView &view, b
     VkRect2D scissor{{0, 0}, {t.width, t.height}};
     vkCmdSetViewport(command_, 0, 1, &viewport);
     vkCmdSetScissor(command_, 0, 1, &scissor);
-    vkCmdPushConstants(command_, environmentLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(view), &view);
+    auto environment = view;
+    if (isScene3D(Background(int(view.options[0])))) {
+        Quat inverse{-sceneAnchor_.orientation.x, -sceneAnchor_.orientation.y, -sceneAnchor_.orientation.z,
+                     sceneAnchor_.orientation.w};
+        auto local = [&](std::array<float, 4> a) {
+            auto v = rotate(inverse, {a[0], a[1], a[2]});
+            return std::array<float, 4>{v.x, v.y, v.z, 0};
+        };
+        environment.forward = local(view.forward);
+        environment.right = local(view.right);
+        environment.up = local(view.up);
+    }
+    environment.shape[3] = float(sceneMask_);
+    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, environmentLayout_, 0, 1,
+                            &descriptor_, 0, nullptr);
+    vkCmdPushConstants(command_, environmentLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(environment), &environment);
     vkCmdDraw(command_, 3, 1, 0, 0);
 }
 void VulkanRenderer::drawSpatial(const Target &t, const SpatialMesh &mesh, const Mat4 &matrix,
@@ -706,19 +1117,22 @@ void VulkanRenderer::drawSpatial(const Target &t, const SpatialMesh &mesh, const
     VkClearValue clear[2]{};
     clear[1].depthStencil = {1, 0};
     VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    pass.renderPass = spatialPass_;
+    // Only depth owned by the compositor must survive; framebuffers fit both compatible passes.
+    pass.renderPass = t.depthMemory ? spatialDiscardPass_ : spatialPass_;
     pass.framebuffer = t.framebuffer;
     pass.renderArea = {{0, 0}, {t.width, t.height}};
     pass.clearValueCount = 2;
     pass.pClearValues = clear;
     vkCmdBeginRenderPass(command_, &pass, VK_SUBPASS_CONTENTS_INLINE);
-    if (env && env->options[0] < 1.5f)
-        environment(t, *env, true);
-    vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, spatialPipeline_);
     VkViewport viewport{0, 0, float(t.width), float(t.height), 0, 1};
     VkRect2D scissor{{0, 0}, {t.width, t.height}};
     vkCmdSetViewport(command_, 0, 1, &viewport);
     vkCmdSetScissor(command_, 0, 1, &scissor);
+    if (env && sceneKind_ == Background(int(env->options[0])) && sceneVertexCount_)
+        drawScene(matrix, *env);
+    if (env && int(env->options[0]) != int(Background::Passthrough))
+        environment(t, *env, true);
+    vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_GRAPHICS, spatialPipeline_);
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(command_, 0, 1, &vertexBuffer_, &offset);
     vkCmdPushConstants(command_, spatialLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, matrix.data());
@@ -730,9 +1144,23 @@ VulkanRenderer::~VulkanRenderer() {
     if (!ctx_.device)
         return;
     vkDeviceWaitIdle(ctx_.device);
-    for (auto p : {environmentPipeline_, spatialEnvironmentPipeline_, glassPipeline_})
+    for (auto p : {environmentPipeline_, spatialEnvironmentPipeline_, glassPipeline_, scenePipeline_,
+                   sceneOpenPipeline_, sceneBlurPipeline_})
         if (p)
             vkDestroyPipeline(ctx_.device, p, nullptr);
+    if (sceneLayout_)
+        vkDestroyPipelineLayout(ctx_.device, sceneLayout_, nullptr);
+    if (sceneBuffer_)
+        vkDestroyBuffer(ctx_.device, sceneBuffer_, nullptr);
+    if (sceneMemory_)
+        vkFreeMemory(ctx_.device, sceneMemory_, nullptr);
+    destroyTarget(sceneGlass_);
+    for (auto *target : {&materialColor_, &materialSurface_, &probe_, &brdf_})
+        destroyTarget(*target);
+    if (materialSampler_)
+        vkDestroySampler(ctx_.device, materialSampler_, nullptr);
+    if (probeSampler_)
+        vkDestroySampler(ctx_.device, probeSampler_, nullptr);
     if (environmentLayout_)
         vkDestroyPipelineLayout(ctx_.device, environmentLayout_, nullptr);
     if (spatialPipeline_)
@@ -747,12 +1175,17 @@ VulkanRenderer::~VulkanRenderer() {
         vkDestroyRenderPass(ctx_.device, renderPass_, nullptr);
     if (spatialPass_)
         vkDestroyRenderPass(ctx_.device, spatialPass_, nullptr);
+    if (spatialDiscardPass_)
+        vkDestroyRenderPass(ctx_.device, spatialDiscardPass_, nullptr);
     if (descriptorPool_)
         vkDestroyDescriptorPool(ctx_.device, descriptorPool_, nullptr);
     if (setLayout_)
         vkDestroyDescriptorSetLayout(ctx_.device, setLayout_, nullptr);
     if (sampler_)
         vkDestroySampler(ctx_.device, sampler_, nullptr);
+    if (sceneSampler_)
+        vkDestroySampler(ctx_.device, sceneSampler_, nullptr);
+    for (auto &scene : scenes_) destroyTarget(scene);
     destroyTarget(atlas_);
     destroyTarget(glass_);
     destroyTarget(images_);
