@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "assets/pbr"
 BAKE_SOURCES = ['src/scene.cpp', 'include/cyvr/scene.hpp', 'src/pbr.cpp', 'tools/bake_scene_lighting.cpp']
 
+def source_digest(name):
+    # Checkouts may use either line ending; only the source text decides whether a bake is stale.
+    return hashlib.sha256((ROOT / name).read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+
 def record_checksums():
     files = sorted(OUTPUT.glob('*.bin'))
     (OUTPUT / 'SHA256SUMS').write_text(''.join(
@@ -212,7 +216,7 @@ def main():
             if data[:4] != b'CYLI' or struct.unpack('<I', data[8:12])[0] != scene:
                 raise SystemExit(f'Invalid lighting resource: {name}')
         (OUTPUT / 'BAKE_SOURCES.sha256').write_text(''.join(
-            f'{hashlib.sha256((ROOT / name).read_bytes()).hexdigest()}  {name}\n' for name in BAKE_SOURCES), encoding='utf-8')
+            f'{source_digest(name)}  {name}\n' for name in BAKE_SOURCES), encoding='utf-8')
         record_checksums()
         print('Lighting asset and source checksums recorded')
         return
@@ -225,7 +229,7 @@ def main():
         if sources.exists():
             for line in sources.read_text().splitlines():
                 digest, name = line.split('  ', 1)
-                if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest:
+                if source_digest(name) != digest:
                     raise SystemExit(f'Lighting bake is stale after changing {name}. Run tools/bake-lighting.ps1.')
         print('PBR asset checksums verified')
         return
