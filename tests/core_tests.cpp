@@ -27,6 +27,29 @@ static void click(UiModel &ui, DrawList &d, Vec2 point) {
 }
 int main() {
     try {
+        {
+            // Embedded browser input must not steal a shared control's active drag.
+            UiModel ui;
+            ui.applicationWidget(1000,{0,0,100,100});
+            int consumed=0;bool surfaceCapture=false;
+            ui.applicationPointer=[&](size_t,Vec2 point,bool down){
+                if(!surfaceCapture && !Rect{200,0,100,100}.contains(point))return false;
+                surfaceCapture=down;consumed++;return true;
+            };
+            ui.pointer(0,{220,20},true);
+            REQUIRE(consumed==1 && ui.captured(0)==0 && surfaceCapture);
+            ui.pointer(0,{-100,-100},false);
+            REQUIRE(consumed==2 && !surfaceCapture);
+            ui.pointer(0,{20,20},true);
+            REQUIRE(ui.captured(0)==1000);
+            ui.pointer(0,{220,20},true);
+            ui.pointer(0,{220,20},false);
+            REQUIRE(consumed==2 && ui.captured(0)==0);
+            ui.modalOpen=true;
+            ui.pointer(0,{220,20},true);
+            ui.pointer(0,{220,20},false);
+            REQUIRE(consumed==2); // Shared modals retain input priority.
+        }
         for (auto background : {Background::Lounge, Background::Observatory, Background::Terrace}) {
             auto scene = buildScene(background);
             REQUIRE(scene.vertices.size() > 3000 && scene.vertices.size() <= 120000 &&

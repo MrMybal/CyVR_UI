@@ -158,6 +158,8 @@ class UiModel {
     std::function<bool(DrawList &)> renderApplicationDock;
     std::function<bool(DrawList &)> renderApplicationDebug;
     std::function<bool(int)> handleApplicationAction;
+    // Optional embedded surface input. Consume only when no shared widget owns capture.
+    std::function<bool(size_t, Vec2, bool)> applicationPointer;
     // Captured slider gestures: preview while dragging, commit once on release.
     std::function<bool(int, float, SliderPhase)> handleApplicationSlider;
     // Return true to consume selection for an application controller gesture.

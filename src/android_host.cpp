@@ -47,7 +47,7 @@ class PanelApp {
     CanvasMapping mapping_;
     UiModel ui_;
     DrawList draw_;
-    bool resumed_{}, dirty_{true}, quit_{}, rendererRecreated_{true}, swapchainInvalid_{}, closing_{};
+    bool resumed_{}, visible_{}, dirty_{true}, quit_{}, rendererRecreated_{true}, swapchainInvalid_{}, closing_{};
     int32_t touchId_{-1};
     uint64_t revision_{};
     std::string storage_;
@@ -57,6 +57,13 @@ class PanelApp {
     static void command(android_app *app, int32_t cmd) {
         auto &self = *static_cast<PanelApp *>(app->userData);
         switch (cmd) {
+        case APP_CMD_START:
+            self.visible_ = true;
+            self.dirty_ = true;
+            break;
+        case APP_CMD_STOP:
+            self.visible_ = false;
+            break;
         case APP_CMD_INIT_WINDOW:
             self.dirty_ = true;
             break;
@@ -426,8 +433,8 @@ class PanelApp {
         while (!app_->destroyRequested && !quit_) {
             android_poll_source *source{};
             int events{};
-            // No frame loop while paused. Idle panels only wake to service UI timers.
-            int timeout = resumed_ && app_->window
+            // Multi-window apps may keep drawing a visible but unfocused panel.
+            int timeout = (resumed_ || (config_.renderWhileVisible && visible_)) && app_->window
                 ? (config_.graphics ? std::clamp(config_.graphics->pollTimeoutMs(),1,33) : 33) : -1;
             while (ALooper_pollOnce(timeout, nullptr, &events, reinterpret_cast<void **>(&source)) >= 0) {
                 if (source)
@@ -454,7 +461,7 @@ class PanelApp {
             }
             if (ui_.exitRequested)
                 break;
-            if (!resumed_ || !app_->window)
+            if ((!resumed_ && !(config_.renderWhileVisible && visible_)) || !app_->window)
                 continue;
             if (dirty_)
                 resize();

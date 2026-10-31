@@ -50,6 +50,14 @@ Returning from immersion destroys the XR session before requesting Home with a p
 
 ### Application integration hooks
 
+`AndroidXrRenderExtension::beginXrFrame(XrTime, bool focused, bool shouldRender)` runs once after input updates and before scene/layer composition. Applications with an external immersive producer can publish predicted poses and input there. They must preserve the validity flags returned by OpenXR and must not infer tracked poses from session focus alone.
+
+`UiModel::applicationPointer(size_t index, Vec2 canvasPosition, bool pressed)` optionally consumes pointer events for embedded application content. It runs only while the interface is visible, no modal is open and no shared widget owns capture. A consuming application owns the continuation/cancellation of its gesture. Native UI controls and modal isolation remain the foundation's responsibility.
+
+`cyvr/icons.hpp` exposes `Icon`, `drawIcon`, `drawLogo` and `themeColors` for application chrome. Icons use the catalogue's shared 24-unit vector grid and scale with the same UI geometry; applications do not need text characters as icon substitutes.
+
+The immersive `AndroidXrRenderExtension::processEye(AndroidXrEyeFrame)` callback is optional and defaults to a no-op. It runs once for each successfully located eye after its scene/hand render completes and before the color/depth swapchain images are released. The frame exposes the acquired single-layer 2D color `Target`, its Vulkan format and dimensions, the eye index, predicted display time and whether the requested background is passthrough. Color supports sampling and color attachment use, and enters in `COLOR_ATTACHMENT_OPTIMAL`. An extension that processes it must finish its GPU work, restore that color layout, preserve the depth image and retain no ownership of the target. The target's views remain valid until graphics shutdown; release extension-owned framebuffers before host targets. UI quads, dock and pointer layers are separate and are not passed to this callback.
+
 The panel host offers optional callbacks on its native thread. `AndroidAppConfig::activityState(bool resumed)` runs on resume/pause; use it to refresh application data without resetting navigation and to commit durable state. `prepareRenderer(VulkanRenderer&, bool recreated)` runs before drawing. Retain source image data in the application and upload it when `recreated` is true, because resizing can replace the renderer while the application model remains alive.
 
 `releaseApplication()` runs while the host's `UiModel` is still alive, including cleanup after a failed panel `configure` callback. Use it to destroy controllers whose destructors detach UI callbacks. The configuration object and its captures must outlive the blocking `runAndroidApp()` call. `UiModel::applicationBack` can consume Android Back for application navigation before the host handles it. Both hosts invoke `activityState` and `releaseApplication`; `prepareRenderer` currently applies to the panel host.
@@ -71,6 +79,8 @@ Scene content can keep a pose independent of `AndroidXrFrame::panel`. This allow
 ## Rendering and input
 
 The 2D host owns an Android Vulkan surface, a FIFO swapchain and retained UI geometry. It acquires an image with a fence, waits for acquisition, renders and transitions the image to `PRESENT_SRC_KHR`, then presents on the same graphics queue. Rendering completes before present; multiple frames in flight are not implemented. Surface loss and resize recreate window targets; same-size Android redraw/resume notifications retain existing resources unless the swapchain is out of date or suboptimal. Pause stops rendering and cancels active pointer capture.
+
+Applications with multiple system windows can opt into `AndroidAppConfig::renderWhileVisible`. With this option, a STARTED, visible panel keeps rendering while another window holds focus; STOPPED panels stop rendering. The default remains false. Input capture still cancels on pause or focus loss. Applications must keep their model, JNI references, Vulkan resources and embedded surfaces independent for each activity. Vulkan loader initialization is serialized, and shared preference writes use a process mutex around the atomic replacement.
 
 Window dimensions map to a centered 1440 × 990 logical canvas with matching inverse input mapping. This preserves the same component layout across hosts; narrow windows currently letterbox rather than reflow. Android motion events are delivered by the Quest system, so no application hand meshes or hand-tracking permissions are needed in strictly 2D apps. The system owns window movement, resizing, minimizing and closing.
 

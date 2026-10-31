@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_JPEG
 #define STBI_NO_STDIO
@@ -52,8 +53,8 @@ void vkCheck(VkResult result, const char *operation) {
         throw std::runtime_error(std::string(operation) + " / Vulkan error " + std::to_string(result));
 }
 void loadVulkan() {
-    if (vkGetInstanceProcAddr)
-        return;
+    static std::once_flag initialized;
+    std::call_once(initialized, [] {
 #ifdef _WIN32
     static HMODULE library = LoadLibraryW(L"vulkan-1.dll");
     if (!library)
@@ -71,6 +72,7 @@ void loadVulkan() {
         throw std::runtime_error("Vulkan function unavailable: " #name);
 #include "cyvr/vulkan_functions.inc"
 #undef CYVR_VK
+    });
 }
 VulkanContext::~VulkanContext() {
     if (device) {

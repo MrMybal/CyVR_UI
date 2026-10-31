@@ -5,9 +5,13 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <mutex>
 namespace cyvr {
 // A process killed during the write leaves the previous file intact.
 inline bool replaceFile(const std::string &path, const std::string &content) {
+    // Windows in the same process share preferences and the temporary path.
+    static std::mutex writes;
+    std::lock_guard<std::mutex> guard(writes);
     const std::string temporary = path + ".tmp";
     std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
     file << content;

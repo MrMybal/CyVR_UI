@@ -1219,6 +1219,10 @@ class QuestApp {
                                    viewProjection(poseOf(views[i].pose), fov.angleLeft, fov.angleRight,
                                                   fov.angleUp, fov.angleDown),
                                    &environment);
+            if (extension_)
+                extension_->processEye({time, uint32_t(i),
+                    layer.targets.at(image * layer.depthImageCount + depthImage),
+                    renderer_->colorFormat(), ui_.settings.background == Background::Passthrough});
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             check(xrReleaseSwapchainImage(layer.swapchain, &release), "release hands");
             if (layer.depthSwapchain)
@@ -1270,6 +1274,8 @@ class QuestApp {
         updatePlacement(state.predictedDisplayTime,
                         float(std::min(.1, ui_.stats.count ? 1 / ui_.stats.fps() : 1 / 72.)));
         input(state.predictedDisplayTime);
+        if (extension_)
+            extension_->beginXrFrame(state.predictedDisplayTime, focused_, state.shouldRender);
         updateScene(state.predictedDisplayTime);
         updateBackground();
         if (ui_.saveRequested) {

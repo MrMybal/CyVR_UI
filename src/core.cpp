@@ -417,6 +417,8 @@ void UiModel::pointer(size_t index, Vec2 pos, bool pressed) {
     if (index >= pointers_.size())
         return;
     auto &pointer = pointers_[index];
+    if (!interfaceHidden && !modalOpen && !pointer.capture && applicationPointer && applicationPointer(index, pos, pressed))
+        return;
     if (interfaceHidden) {
         if (pressed && !pointer.down) {
             revealInterface();

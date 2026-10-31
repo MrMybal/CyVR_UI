@@ -16,6 +16,8 @@ struct AndroidAppConfig {
     std::shared_ptr<AndroidRenderExtension> graphics;
     bool nativeResolution{false};
     bool viewFallback{false};
+    // Opt in for independent 2D windows that remain visible while another has input focus.
+    bool renderWhileVisible{false};
     // Runs on the native host thread. prepareRenderer is currently panel-only.
     std::function<void(VulkanRenderer &, bool recreated)> prepareRenderer;
     std::function<void(bool resumed)> activityState;

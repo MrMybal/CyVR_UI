@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "cyvr/core.hpp"
+#include "cyvr/icons.hpp"
 #include <cstdio>
 
 namespace cyvr {
@@ -80,30 +81,8 @@ std::string wrap(const DrawList &d, float size, float maxWidth, std::string_view
     }
     return out;
 }
-enum class Icon {
-    Home,
-    Components,
-    Settings,
-    Diagnostics,
-    Move,
-    Pin,
-    Eye,
-    Headset,
-    Follow,
-    Minimize,
-    Close,
-    Restore,
-    Open,
-    Camera,
-    Globe,
-    Recenter,
-    Bars,
-    Check,
-    Warning,
-    Selector
-};
 // Every icon shares one 24-unit grid and stroke, so only size and color vary between surfaces.
-void drawIcon(DrawList &d, Icon icon, Vec2 center, float size, Color c, float weight = 2) {
+void drawIconImpl(DrawList &d, Icon icon, Vec2 center, float size, Color c, float weight = 2) {
     const float s = size / 24, stroke = weight * s;
     auto at = [&](float x, float y) { return Vec2{center.x + (x - 12) * s, center.y + (y - 12) * s}; };
     std::array<Vec2, 40> points;
@@ -133,6 +112,38 @@ void drawIcon(DrawList &d, Icon icon, Vec2 center, float size, Color c, float we
     auto ring = [&](float x, float y, float r) { d.ring(at(x, y), r * s, stroke, c); };
     auto dot = [&](float x, float y, float r) { d.circle(at(x, y), r * s, c); };
     switch (icon) {
+    case Icon::NewWindow:
+        box(2,3,20,18,2);path({{2,8},{22,8}});path({{12,11},{12,18}});path({{8.5f,14.5f},{15.5f,14.5f}});break;
+    case Icon::Shield:
+        path({{12,2.5f},{21,6},{20,14},{17,19},{12,22},{7,19},{4,14},{3,6}},true);
+        path({{8,12},{11,15},{16,9}});break;
+    case Icon::Back:
+        path({{14.5f,5},{7.5f,12},{14.5f,19}});break;
+    case Icon::Forward:
+        path({{9.5f,5},{16.5f,12},{9.5f,19}});break;
+    case Icon::Reload:
+        arc(12,12,8,8,45,315,26,false);path({{18,4},{18,10},{12,10}});break;
+    case Icon::Plus:
+        path({{12,5},{12,19}});path({{5,12},{19,12}});break;
+    case Icon::Bookmark:
+        path({{6,3.5f},{18,3.5f},{18,21},{12,17},{6,21}},true);break;
+    case Icon::Extensions:
+        path({{3,4},{9,4},{9,3},{10,1.5f},{12,1},{14,1.5f},{15,3},{15,4},{21,4},{21,10},
+              {20,10},{18.5f,11},{18,13},{18.5f,15},{20,16},{21,16},{21,21},{15,21},{15,20},
+              {14,18.5f},{12,18},{10,18.5f},{9,20},{9,21},{3,21},{3,16},{4,16},{5.5f,15},
+              {6,13},{5.5f,11},{4,10},{3,10}},true);break;
+    case Icon::Search:
+        ring(10.5f,10.5f,6.5f);path({{15.5f,15.5f},{21,21}});break;
+    case Icon::More:
+        dot(5,12,1.5f);dot(12,12,1.5f);dot(19,12,1.5f);break;
+    case Icon::Stop:
+        box(5,5,14,14,2);break;
+    case Icon::ArrowEnter:
+        path({{20,5},{20,13},{4,13},{9,8}});path({{4,13},{9,18}});break;
+    case Icon::Keyboard:
+        box(2,5,20,14,2);path({{6,9},{6,10}});path({{10,9},{10,10}});path({{14,9},{14,10}});path({{18,9},{18,10}});path({{7,15},{17,15}});break;
+    case Icon::Trash:
+        path({{3,6},{21,6}});path({{9,3},{15,3}});path({{5,6},{6,21},{18,21},{19,6}});path({{10,10},{10,17}});path({{14,10},{14,17}});break;
     case Icon::Home:
         path({{3, 11.5f}, {12, 3.5f}, {21, 11.5f}});
         path({{5.5f, 9.5f}, {5.5f, 20.5f}, {18.5f, 20.5f}, {18.5f, 9.5f}});
@@ -276,6 +287,9 @@ void toggleSwitch(DrawList &d, Rect r, bool checked) {
     d.circle({checked ? r.x + r.w - r.h * .5f : r.x + r.h * .5f, r.y + r.h * .5f}, knob, checked ? ink : muted);
 }
 } // namespace
+void drawIcon(DrawList& d,Icon icon,Vec2 center,float size,Color color,float weight){drawIconImpl(d,icon,center,size,color,weight);}
+void drawLogo(DrawList& d,Vec2 center,Color color){logo(d,center,color);}
+ThemeColors themeColors(const Settings& settings){palette(settings);return {mint,white,muted,lineColor,panelColor,surfaceColor,hoverColor,selectedColor};}
 void UiModel::drawMain(DrawList &d) {
     if (renderApplication && renderApplication(d))
         return;
