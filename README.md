@@ -2,7 +2,7 @@
 
 A native, open-source **2D interface foundation** for applications on **Meta Quest 2, Quest 3S, Quest 3 and Quest Pro**, with an optional immersive host. Built with **C++17 and Vulkan**, plus **OpenXR only for immersion**, with a custom UI renderer and no game engine or web runtime.
 
-Version **0.8.0** starts in a resizable native Android 2D window managed by Horizon OS. This lets ordinary apps share the Quest workspace. Apps that need a full 3D experience can opt into the immersive activity; both hosts reuse the same UI components, themes, translations and preferences. A 2D-only build excludes OpenXR entirely. Hybrid transitions require Horizon OS v69 or later.
+Version **0.9.1** starts in a resizable native Android 2D window managed by Horizon OS. This lets ordinary apps share the Quest workspace. Apps that need a full 3D experience can opt into the immersive activity; both hosts reuse the same UI components, themes, translations and preferences. A 2D-only build excludes OpenXR entirely. Hybrid transitions require Horizon OS v69 or later.
 
 The project includes reusable C++ libraries, a standalone Quest reference app and a Windows inspector. The previous immersive implementation has been exercised on Quest 3; see [Validation](docs/VALIDATION.md) for the status of the new 2D host and other devices.
 
@@ -15,7 +15,7 @@ The image shows the shared catalogue in the Windows inspector. Native 2D mode us
 - A component catalogue: buttons, toggles, sliders with pointer capture, segmented controls, badges, toasts and modal dialogs.
 - Native 2D windows with system pointer/touch input and Quest window management; no OpenXR session in the panel host.
 - Optional immersive mode, selected explicitly through a headset icon; its overlapping-window icon returns to 2D.
-- In immersive mode, a floating icon bar for moving, minimizing, closing, restoring and changing window placement. Action names appear on hover.
+- In immersive mode, a fixed minimal bar reveals placement, minimize and close icons at its sides on hover. Grip anywhere on the window moves it or resizes an enabled edge; the thumbstick adjusts distance and yaw. Tracked hands support a closed-hand grab on the same surface.
 - In immersive mode, world anchoring, viewer-facing orientation and smooth view following. Following pauses during interaction.
 - Graphite, Light and Ocean themes; surface opacity; frosted glass over the native environment; 4K Sunlit Lounge and Venice Sunset photographic backgrounds.
 - Three original, fully modeled 3D environments: Modern Lounge, Observatory and Sunset Terrace, with stereo depth and translational parallax.
@@ -61,6 +61,12 @@ For a connected development headset:
 
 The APK uses a local development signing key. A production distribution needs its own signing and release configuration. Build output is kept in `build/` and `dist/`; generated application packages are not committed to the source repository.
 
+## PC interface editor
+
+Run **dist/windows/CyVR_Editor.exe** after a Windows build to edit the native 2D reference screens. Select, move, resize and style elements, switch between faithful and schematic views, and save versioned JSON. **Export AI** produces the document, a readable element outline and screen PNGs for use with an assistant.
+
+The optional **cyvr_layout** library can render these documents in an application while preserving action IDs and edited hit regions. Live behavior remains application-owned. See the [editor guide](docs/INTERFACE_EDITOR.md), [reference document](design/reference.cyvr.json) and [JSON schema](design/layout.schema.json).
+
 ## Controls
 
 **Native 2D:** use the Quest system pointer, hand pinch or touch to activate controls. Drag sliders through the same shared input-capture code. Move, resize, minimize and close the window with Horizon OS controls. Settings show appearance and accessibility controls; hand meshes, 3D distance and world anchoring belong to the immersive host.
@@ -71,7 +77,9 @@ The APK uses a local development signing key. A production distribution needs it
 |---|---|---|
 | Point | Aim a controller; the pointer and reticle indicate the target | Aim the hand pointer |
 | Select | Press and release the trigger | Pinch and release thumb and index |
-| Move a window | Hold the four-arrow handle in the floating bar or title area | Hold the same handle with a pinch |
+| Move a window | Aim anywhere on it and hold grip; the title/bar drag handles also work with the trigger | Aim anywhere on it and close the hand; pinch remains available on the title/bar handles |
+| Resize a window | Aim at an edge/corner and hold grip, when resizing is enabled | Aim at an enabled edge/corner and close the hand |
+| Distance / rotation while holding | Thumbstick up/down moves farther/closer; left/right rotates the panel | — |
 | Minimize / restore | Use the minus / overlapping-window icon | Select the same icon |
 | Close / reopen | Use the cross / CyVR grid icon | Select the same icon |
 | Placement mode | Cycle the pin, eye and headset icon, or use Settings | Select the same controls |
@@ -79,7 +87,7 @@ The APK uses a local development signing key. A production distribution needs it
 | Recenter | UI button or right stick click | UI button |
 | Diagnostics HUD | UI button or left X button | UI button |
 
-The floating bar remains available while the content is minimized or closed. Minimizing preserves the page; closing returns to Home when reopened. Moving a followed window switches it back to a world anchor. On release, the window faces the viewer without copying head roll. Reduced motion slows automatic following.
+The immersive bar keeps the same shape, size and position. Enter its fixed hover zone to reveal placement on the left and minimize/close on the right; the bar never expands into a toolbar. It remains available while content is minimized or closed. Settings → Placement → Reveal window icons on hover controls whether the side icons wait for hover or remain visible. Minimizing preserves the page; closing returns to Home when reopened. Windows face the viewer by default, including while being moved. Moving a view-followed window leaves it anchored at the chosen position and keeps viewer-facing orientation. Thumbstick rotation is retained until recentering. Resizing preserves the canvas aspect ratio. See [window interactions](docs/WINDOW_INTERACTIONS.md) for application configuration and limits.
 
 The Windows inspector uses the mouse. The move handle drags the native window; keys **1–4** select pages, **D** toggles the HUD, **R** recenters the preview, and **Escape** dismisses a modal.
 
@@ -159,7 +167,7 @@ Frosted glass renders the actual scene through the panel's off-axis frustum into
 
 The shared layout currently fits a 1440 × 990 logical canvas while preserving aspect ratio; it letterboxes rather than reflowing at narrow window sizes. In 2D, opacity and blur affect only the app-owned backdrop, not other apps or the system environment.
 
-Immersive windows are flat. Cross-layer hand occlusion requires the depth-composition capabilities described above and still needs visual verification on each headset/runtime. Blur covers the native environment, not hands or passthrough. Free window rotation, two-hand resizing, curved panels, editable text fields, a virtual keyboard and eye tracking are not implemented.
+Immersive windows are flat. Cross-layer hand occlusion requires the depth-composition capabilities described above and still needs visual verification on each headset/runtime. Blur covers the native environment, not hands or passthrough. Manual pitch/roll rotation, two-hand resizing, curved panels, editable text fields, a virtual keyboard and eye tracking are not implemented.
 
 ## Asset tools
 

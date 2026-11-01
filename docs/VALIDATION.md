@@ -67,6 +67,30 @@ The Vulkan regression renders an AR frame after a modeled scene and checks that 
 
 Windows core/GPU tests and Android hybrid/strictly 2D builds pass, including APK signature/alignment and Vulkan 1.1 SPIR-V validation. The strictly 2D APK contains no OpenXR loader or immersive environment assets. The 0.8.0 hybrid APK installs on the connected Quest 3 and its panel launch is accepted. In-headset AR visibility, repeated toggling and sleep/resume still need tester confirmation. Passthrough error/reinitialization handling is implemented; runtime fault cases still require device testing.
 
+## PC 2D editor
+
+The native Windows editor builds alongside the inspector. Automated checks cover UI core, layout document operations/persistence, lighting baker, Vulkan rendering, layout rendering parity and native editor controls/gestures. Layout parity covers all six reference states in English and French. JSON/Markdown/PNG export and document reopening are exercised separately. The editor uses an optional layout library; the stock Quest reference does not load exported designs automatically.
+
+Android hybrid and strictly 2D builds pass signature/alignment checks after adding capture support. These checks establish build compatibility; the device validation below remains separate.
+
+## Immersive window controls (0.9.0)
+
+The seven Windows checks pass, including the new portable window-interaction test. It covers grip hysteresis, no jump at capture, movement with viewer-facing orientation, distance limits, thumbstick yaw around the panel centre, edge/corner resizing, fixed opposite anchors, aspect/size limits, resize reference rebasing, tracking loss/rearming, controller ownership and trigger-handle compatibility. UI checks cover the minimal bar, hover reveal/grace/collapse, removal of hidden-button hit regions, reduced motion and preference persistence.
+
+Native Vulkan previews of the collapsed bar, revealed buttons and French placement settings were inspected. These are deterministic desktop fixtures, not headset observations. Existing application input hooks and custom dock/compact/hidden UI paths remain supported. Stock grip gestures send neutral application input while manipulating a managed window.
+
+Android hybrid and strictly 2D builds pass signature and 16 KiB alignment checks. Both APKs declare 0.9.0 / version code 11; the strictly 2D ELF has no OpenXR dependency. The hybrid APK installs on the connected Quest 3, its PanelActivity launch is accepted and the application process remains alive. This observation alone does not confirm presented pixels. The new controller gestures, edge targeting, placement comfort, focus/tracking recovery and absence of accidental clicks still require in-headset validation. Native 2D windows continue to use Horizon OS controls.
+
+### Fixed bar and full-surface grabs (0.9.1)
+
+The tester rejected 0.9.0: the bar transformed into a toolbar, and movement appeared to require a handle. The tracked-hand path supplied selection pinches but no full-surface grab. Those behaviors were not accepted as validation of the requested interaction.
+
+Version 0.9.1 keeps the same bar geometry, opacity and position at every reveal level. Placement appears on the left; minimize/close or restore appear on the right. The fixed hover zone includes these side positions while their buttons are still hidden. Native Vulkan snapshots were inspected and the rendered bar pixels match exactly before/after hover. The real placement-settings toggle is now covered by input dispatch tests.
+
+Window-grab targeting now intersects the complete physical panel independently of widget capture. The tracked-hand path detects four-finger closure and carries the last open-hand aim relative to the tracked wrist while closed. Tests cover grabs across navigation/content/button areas, open/closed finger samples, exclusion of simple pointing, wrist-relative ray movement/rotation, invalid-wrist cancellation, unchanged bar geometry/opacity and non-overlapping side-icon hit regions. All seven Windows suites pass.
+
+The 0.9.1 hybrid and strictly 2D APKs build and pass signature/16 KiB alignment checks. The hybrid APK installs on Quest 3 and its PanelActivity launch is accepted. Actual full-surface controller/hand grabs, accidental-pinch avoidance and hover-zone ergonomics still require headset feedback; the preceding desktop checks do not establish them.
+
 ## Remaining device validation
 
 - Quest 2, Quest 3S and Quest Pro readability, input and performance.

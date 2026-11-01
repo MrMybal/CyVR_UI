@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CyVR 2D interface document, version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "name",
+    "language",
+    "screens"
+  ],
+  "properties": {
+    "format": {
+      "const": "cyvr-ui-layout"
+    },
+    "version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "language": {
+      "type": "string",
+      "maxLength": 32
+    },
+    "screens": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "canvas",
+          "elements"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "canvas": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number",
+              "minimum": 64,
+              "maximum": 4096
+            }
+          },
+          "elements": {
+            "type": "array",
+            "maxItems": 8192,
+            "items": {
+              "$ref": "#/$defs/element"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "element": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "type",
+        "bounds"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "type": {
+          "enum": [
+            "group",
+            "rect",
+            "border",
+            "text",
+            "icon",
+            "logo",
+            "circle",
+            "ring",
+            "line",
+            "path",
+            "triangle",
+            "image",
+            "video",
+            "overlay"
+          ]
+        },
+        "parent": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+        },
+        "bounds": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "minimum": -32768,
+              "maximum": 32768
+            },
+            {
+              "type": "number",
+              "minimum": -32768,
+              "maximum": 32768
+            },
+            {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 8192
+            }
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "color": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "viewBox": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 8192
+          }
+        },
+        "uv": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "number",
+            "minimum": -16,
+            "maximum": 16
+          }
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "stroke": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 128
+        },
+        "fontSize": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 512
+        },
+        "icon": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 33
+        },
+        "action": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "control": {
+          "enum": [
+            "button",
+            "slider",
+            "drag"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "localizationKey": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "points": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 2
+            }
+          }
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "closed": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

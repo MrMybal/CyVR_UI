@@ -59,6 +59,8 @@ inline Settings loadSettings(const std::string &path) {
             s.handModel = HandModel(int(value));
         else if (key == "follow")
             s.follow = FollowMode(int(value));
+        else if (key == "minimalDock")
+            s.minimalDock = value != 0;
         else if (key == "opacity")
             s.opacity = value;
         else if (key == "blur")
@@ -86,7 +88,7 @@ inline bool saveSettings(const std::string &path, const Settings &s) {
       << "\nbrightness " << s.brightness << "\nhandScale " << s.handScale << "\nhandPitch " << s.handPitch
       << "\nenvironmentDim " << s.environmentDim << "\nvirtualBackground "
       << int(s.background == Background::Passthrough ? s.virtualBackground : s.background) << "\nrays "
-      << s.rays << '\n';
+      << s.rays << "\nminimalDock " << s.minimalDock << '\n';
     return replaceFile(path, f.str());
 }
 inline bool exportDiagnostic(const std::string &path, const UiModel &model) {

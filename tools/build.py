@@ -57,7 +57,13 @@ def windows(tests_only=False):
         output = ROOT / "dist/windows"
         output.mkdir(parents=True, exist_ok=True)
         shutil.copy2(directory / "CyVR_UI.exe", output / "CyVR_UI.exe")
+        if (directory / "CyVR_Editor.exe").exists():
+            shutil.copy2(directory / "CyVR_Editor.exe", output / "CyVR_Editor.exe")
         shutil.copytree(directory / "assets", output / "assets", dirs_exist_ok=True)
+        (output / "design").mkdir(exist_ok=True)
+        for name in ("reference.cyvr.json", "layout.schema.json"):
+            if (ROOT / "design" / name).is_file():
+                shutil.copy2(ROOT / "design" / name, output / "design" / name)
         notices(output / "licenses")
         print("Native reference:", output / "CyVR_UI.exe")
 

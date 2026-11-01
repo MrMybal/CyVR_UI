@@ -519,33 +519,36 @@ int main() {
         ui.saveRequested = true;
         ui.drawMain(draw);
         // Separate dock survives minimization/closing; content hit regions disappear.
+        ui.settings.minimalDock = false; // Keep the side icons visible for this check.
+        ui.settings.follow = FollowMode::World; // Cycle starts from its explicit baseline.
         ui.drawDock(draw);
         for (auto v : draw.vertices) {
             REQUIRE(v.x >= 0 && v.x <= dockWidth);
             REQUIRE(v.y >= 0 && v.y <= dockHeight);
         }
-        ui.pointer(0, {780, 1050}, true);
-        ui.pointer(0, {780, 1050}, false);
+        ui.pointer(0, {844, 1058}, true);
+        ui.pointer(0, {844, 1058}, false);
         REQUIRE(ui.windowState == WindowState::Minimized);
         ui.drawDock(draw);
         for (auto &w : ui.widgets())
             REQUIRE(w.id >= 600 && w.id != 605);
-        ui.pointer(0, {840, 1050}, true);
-        ui.pointer(0, {840, 1050}, false);
+        ui.pointer(0, {844, 1058}, true);
+        ui.pointer(0, {844, 1058}, false);
         REQUIRE(ui.windowState == WindowState::Open);
         ui.drawMain(draw);
         ui.drawDock(draw);
-        ui.pointer(0, {900, 1050}, true);
-        ui.pointer(0, {900, 1050}, false);
+        ui.pointer(0, {916, 1058}, true);
+        ui.pointer(0, {916, 1058}, false);
         REQUIRE(ui.windowState == WindowState::Closed && ui.page == Page::Home);
         ui.drawDock(draw);
-        ui.pointer(0, {840, 1050}, true);
-        ui.pointer(0, {840, 1050}, false);
+        ui.pointer(0, {844, 1058}, true);
+        ui.pointer(0, {844, 1058}, false);
         REQUIRE(ui.windowState == WindowState::Open);
         ui.drawMain(draw);
         ui.drawDock(draw);
-        ui.pointer(0, {660, 1050}, true);
-        ui.pointer(0, {660, 1050}, false);
+        ui.settings.follow = FollowMode::World;
+        ui.pointer(0, {596, 1058}, true);
+        ui.pointer(0, {596, 1058}, false);
         REQUIRE(ui.settings.follow == FollowMode::FaceViewer && ui.saveRequested);
         for (int theme = 0; theme < 3; theme++)
             for (int tab = 0; tab < 3; tab++) {

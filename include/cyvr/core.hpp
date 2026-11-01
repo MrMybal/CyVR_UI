@@ -8,6 +8,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace cyvr {
@@ -75,6 +76,20 @@ struct Hit {
     Vec3 world{};
     float distance{};
 };
+// One predicted controller sample, including the hit on the current UI panel.
+// Pose/ray use the host's LOCAL space; timeNs is its monotonic prediction time.
+struct ControllerInput {
+    size_t hand{};
+    Vec2 stick{};
+    float trigger{}, grip{};
+    Pose pose{};
+    bool poseValid{};
+    Hit pointer{};
+    Vec3 rayOrigin{}, rayDirection{0,0,-1};
+    bool rayValid{};
+    float deltaSeconds{1.f/72};
+    int64_t timeNs{};
+};
 Hit intersectPanel(Vec3 origin, Vec3 direction, const PanelGeometry &panel, bool clip = true);
 PanelGeometry placePanel(Pose head, float distance, float scale, int pixelsW = 1440, int pixelsH = 990);
 Quat faceViewer(Vec3 panel, Vec3 viewer);
@@ -87,10 +102,32 @@ struct Color {
 struct Vertex {
     float x, y, u, v, r, g, b, a;
 };
+// Optional authoring capture. Null during normal application rendering.
+enum class PaintKind { Rect, Border, Circle, Ring, Line, Path, Triangle, Text, Image, Video, Overlay, Icon, Logo };
+struct PaintCommand {
+    PaintKind kind{PaintKind::Rect};
+    Rect bounds{}, uv{};
+    Color color;
+    float radius{}, stroke{1}, fontSize{24};
+    int icon{};
+    bool closed{};
+    std::string text;
+    std::vector<Vec2> points;
+};
 struct DrawList {
     std::vector<Vertex> vertices;
+    std::vector<PaintCommand> *capture{};
     DrawList() { vertices.reserve(48000); }
-    void clear() { vertices.clear(); }
+    void clear() { vertices.clear(); if (capture) capture->clear(); }
+    template <class Render> void record(PaintCommand command, Render render) {
+        auto *sink = capture;
+        capture = nullptr;
+        try {
+            sink->push_back(std::move(command));
+            render();
+        } catch (...) { capture = sink; throw; }
+        capture = sink;
+    }
     void triangle(Vec2 a, Vec2 b, Vec2 c, Color color);
     // Rounded corners, circles and strokes are anti-aliased by ui.frag at any target resolution.
     void rect(Rect rect, Color color, float radius = 0);
@@ -114,6 +151,13 @@ enum class HandModel { Automatic, Studio, Skeleton, Hidden };
 enum class FollowMode { World, FaceViewer, FollowView };
 enum class WindowState { Open, Minimized, Closed };
 enum class Presentation { Panel2D, Immersive };
+enum WindowEdge : uint8_t { EdgeNone = 0, EdgeLeft = 1, EdgeRight = 2, EdgeTop = 4, EdgeBottom = 8 };
+struct WindowOptions {
+    bool movable{true}, resizable{true}, faceViewerWhileMoving{true};
+    // Immersive resizing keeps the logical canvas aspect ratio.
+    float minWidth{.45f}, maxWidth{3.f}, minDistance{.65f}, maxDistance{4.f};
+    float edgePixels{28}, moveSpeed{1.3f}, turnSpeed{1.6f}, stickDeadZone{.18f};
+};
 struct Settings {
     std::string language{"en"};
     float distance{1.35f}, scale{1};
@@ -123,7 +167,8 @@ struct Settings {
     Background background{Background::Studio};
     Background virtualBackground{Background::Studio}; // Restored when leaving optional AR.
     HandModel handModel{HandModel::Automatic};
-    FollowMode follow{FollowMode::World};
+    FollowMode follow{FollowMode::FaceViewer};
+    bool minimalDock{true};
     float opacity{.9f}, blur{.5f}, brightness{.65f}, handScale{1}, handPitch{};
     float environmentDim{1}; // Linear environment-only dimmer; video layers are independent.
     bool rays{true};
@@ -164,6 +209,22 @@ class UiModel {
     std::function<bool(int, float, SliderPhase)> handleApplicationSlider;
     // Return true to consume selection for an application controller gesture.
     std::function<bool(int, Vec2, float, float, Pose, bool)> applicationController;
+    // Preferred input hook, after resolving the current ray hit. True consumes
+    // selection; return false for scrolling that should retain normal hovering.
+    std::function<bool(const ControllerInput&)> applicationInput;
+    // Logical-pixel scroll delta at the current system pointer (2D wheel/Quest).
+    std::function<bool(Vec2,Vec2)> applicationScroll;
+    bool scroll(Vec2 point,Vec2 pixels){
+        return !interfaceHidden && !modalOpen && applicationScroll && applicationScroll(point,pixels);
+    }
+    bool controllerInput(const ControllerInput& input) {
+        if(applicationInput)return applicationInput(input);
+        return applicationController && applicationController(int(input.hand),input.stick,input.trigger,input.grip,input.pose,input.poseValid);
+    }
+    // Resolved controller/hand ray and pinch state, before stock panel hit testing.
+    std::function<bool(size_t, Vec3, Vec3, bool, bool, Vec2, float)> applicationRay;
+    // Observe button state even while a native widget owns pointer capture.
+    std::function<void(size_t, Vec2, bool)> applicationPointerState;
     // Runs after shared chrome and before catalogue content. Settings can keep the stock page.
     std::function<bool(DrawList &)> renderContent;
     std::function<void(double)> applicationTick;
@@ -180,6 +241,9 @@ class UiModel {
     void clearApplicationWidgets() { widgets_.clear(); }
     const std::string &toast() const { return toast_; }
     Settings settings;
+    WindowOptions window;
+    uint8_t windowEdges{};
+    bool windowGrabbed{}, windowResizing{};
     Presentation presentation{Presentation::Panel2D};
     bool immersiveAvailable{}, immersiveRequested{}, panelRequested{};
     // Application cinema mode. Hosts suppress their chrome; content keeps rendering.
@@ -206,6 +270,11 @@ class UiModel {
     void drawDebug(DrawList &draw);
     // Dock widgets use a separate surface in virtual coordinates below the main panel.
     void drawDock(DrawList &draw);
+    void drawWindowAffordances(DrawList &draw) const;
+    bool dockHitTest(Vec2 pixels) const;
+    void updateDockPointer(size_t index, Vec2 pixels);
+    float dockReveal() const { return settings.minimalDock ? dockReveal_ : 1.f; }
+    void setWindowFeedback(uint8_t edges, bool grabbed, bool resizing);
     void pointer(size_t index, Vec2 position, bool pressed);
     void setInterfaceHidden(bool hidden);
     // True means the activating input was consumed solely to restore the UI.
@@ -237,6 +306,7 @@ class UiModel {
     }
     bool interacting() const { return pointers_[0].down || pointers_[1].down; }
     int captured(size_t index) const { return index < 2 ? pointers_[index].capture : 0; }
+    Vec2 pointerPosition(size_t index) const { return index<2?pointers_[index].pos:Vec2{-100,-100}; }
 
   private:
     std::string number(double value, int decimals = 1) const {
@@ -251,6 +321,9 @@ class UiModel {
     std::string toast_;
     double time_{}, toastUntil_{};
     bool sliderUnsaved_{};
+    std::array<bool, 2> dockHovered_{};
+    double dockHoldUntil_{};
+    float dockReveal_{};
     bool pressed(int id) const { return pointers_[0].capture == id || pointers_[1].capture == id; }
     void action(int id);
     void slide(int id, float fraction, SliderPhase phase);

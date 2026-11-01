@@ -364,6 +364,10 @@ int main(int argc, char **argv) {
         if (toastPreview)
             app.model.notify("toast.exported_desktop");
         if (hoverId) {
+            if(isDockWidget(hoverId)){
+                app.model.updateDockPointer(0,{720,1058});
+                app.model.tick(.1);
+            }
             DrawList sample;
             app.model.drawMain(sample);
             app.model.drawDock(sample);

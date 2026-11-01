@@ -4,6 +4,7 @@
 #include "cyvr/gpu.hpp"
 #include "cyvr/xr_depth.hpp"
 #include "cyvr/storage.hpp"
+#include "cyvr/window.hpp"
 #include <android/asset_manager.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
@@ -148,6 +149,7 @@ class QuestApp {
     bool passthroughInterrupted_{}; // Recoverable runtime error: waits for RESTORED, keeps the AR choice.
     bool depthCompositionEnabled_{};
     std::array<HandSkin, 2> handSkins_;
+    std::array<HandGrabRay,2> handGrabRays_;
     XrPassthroughFB passthrough_{};
     XrPassthroughLayerFB passthroughLayer_{};
     PFN_xrDestroyPassthroughFB destroyPassthrough_{};
@@ -163,9 +165,8 @@ class QuestApp {
     HandSurface controllerSurface_;
     std::array<Vec3, 2> rayOrigin_{}, rayDirection_{};
     std::array<bool, 2> rayValid_{}, handReported_{};
-    int windowDragIndex_{-1};
-    float windowDragDepth_{};
-    Vec3 windowDragOffset_{};
+    WindowMotion windowMotion_;
+    std::array<bool,2> windowSelectionSuppressed_{};
     std::array<Hit, 2> hits_{};
     std::array<float, 2> cursorSize_{{.012f, .012f}};
     VulkanContext gpu_;
@@ -185,6 +186,7 @@ class QuestApp {
     double lastGlassRender_{-1};
     Pose glassEye_, glassPanel_;
     XrTime recenterAfter_{};
+    XrTime lastInputTime_{};
     std::chrono::steady_clock::time_point clock_ = std::chrono::steady_clock::now(), lastFrame_ = clock_;
     PFN_xrEnumerateDisplayRefreshRatesFB enumerateRates_{};
     PFN_xrRequestDisplayRefreshRateFB requestRate_{};
@@ -837,6 +839,8 @@ class QuestApp {
             XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
         if ((head.locationFlags & valid) != valid && (!config_.viewFallback || panelPlaced_))return;
         panelViewRelative_=(head.locationFlags&valid)!=valid;
+        windowMotion_.recenter();
+        ui_.setWindowFeedback(0,false,false);
         panel_ = placePanel(panelViewRelative_ ? Pose{} : poseOf(head.pose), ui_.settings.distance, ui_.settings.scale);
         debugPanel_ = panel_;
         positionAccessories();
@@ -878,7 +882,7 @@ class QuestApp {
             return;
         if(panelViewRelative_)recenter(time);
         headPose_ = poseOf(location.pose);
-        if (panelPlaced_ && !ui_.interacting() && windowDragIndex_ < 0) {
+        if (panelPlaced_ && !ui_.interacting() && !windowMotion_.active()) {
             Pose target = panel_.pose;
             if (ui_.settings.follow == FollowMode::FollowView) {
                 target = placePanel(headPose_, ui_.settings.distance, ui_.settings.scale).pose;
@@ -888,7 +892,7 @@ class QuestApp {
                 target.position = headPose_.position + forward * ui_.settings.distance + Vec3{0, -.1f, 0};
             }
             if (ui_.settings.follow != FollowMode::World) {
-                target.orientation = faceViewer(target.position, headPose_.position);
+                target.orientation = windowMotion_.facing(target.position, headPose_.position);
                 panel_.pose =
                     approachPose(panel_.pose, target, dt * (ui_.settings.reducedMotion ? .4f : 1.f));
             }
@@ -902,7 +906,8 @@ class QuestApp {
         check(xrGetActionStateBoolean(session_, &get, &state), "button state");
         return state.isActive && state.changedSinceLastSync && state.currentState;
     }
-    bool trackedHand(int index, XrTime time, bool &down) {
+    bool trackedHand(int index, XrTime time, bool &down, float &grip) {
+        grip = 0;
         if (!handTrackers_[index])
             return false;
         std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
@@ -921,8 +926,10 @@ class QuestApp {
         info.baseSpace = local_;
         info.time = time;
         XrResult result = locateHand_(handTrackers_[index], &info, &locations);
-        if (XR_FAILED(result) || !locations.isActive)
+        if (XR_FAILED(result) || !locations.isActive) {
+            handGrabRays_[index].reset();
             return false;
+        }
         auto valid = [&](int j) {
             return bool(joints[j].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
         };
@@ -945,59 +952,91 @@ class QuestApp {
             handReported_[index] = true;
             log(index == 0 ? "Left hand tracked" : "Right hand tracked");
         }
+        grip = handGrabStrength(rig);
+        Pose aimPose;
+        bool aimValid = false;
         if (handAimEnabled_) {
-            if (!(aim.status & XR_HAND_TRACKING_AIM_VALID_BIT_FB) ||
-                (aim.status & XR_HAND_TRACKING_AIM_SYSTEM_GESTURE_BIT_FB))
+            if (aim.status & XR_HAND_TRACKING_AIM_SYSTEM_GESTURE_BIT_FB) {
+                handGrabRays_[index].reset();
+                grip = 0;
                 return false;
-            Pose pose = poseOf(aim.aimPose);
-            rayOrigin_[index] = pose.position;
-            rayDirection_[index] = rotate(pose.orientation, {0, 0, -1});
-            down = aim.pinchStrengthIndex > (pressed_[index] ? .6f : .8f);
+            }
+            aimValid = aim.status & XR_HAND_TRACKING_AIM_VALID_BIT_FB;
+            aimPose = poseOf(aim.aimPose);
+            down = aimValid && aim.pinchStrengthIndex > (pressed_[index] ? .6f : .8f);
         } else {
-            if (!valid(7) || !valid(10) || !valid(5))
-                return false;
-            rayOrigin_[index] = position(7);
-            rayDirection_[index] = normalized(position(10) - position(7));
-            down = length(position(10) - position(5)) < (pressed_[index] ? .034f : .024f);
+            aimValid = valid(7) && valid(10) && valid(5);
+            if (aimValid) {
+                aimPose.position = position(7);
+                aimPose.orientation = faceViewer({}, normalized(position(10) - position(7)) * -1);
+                down = length(position(10) - position(5)) < (pressed_[index] ? .034f : .024f);
+            }
         }
+        Pose ray;
+        if (!handGrabRays_[index].update(rig[1].pose, rig[1].valid, aimPose, aimValid, grip, ray))
+            return false;
+        rayOrigin_[index] = ray.position;
+        rayDirection_[index] = rotate(ray.orientation, {0, 0, -1});
         return true;
     }
-    void moveWindow(XrTime time) {
-        int drag = ui_.dragPointer();
-        if (drag >= 0 && rayValid_[drag]) {
-            if (windowDragIndex_ != drag) {
-                const auto &surface = ui_.captured(drag) == 600 ? dockPanel_ : panel_;
-                Hit hit = intersectPanel(rayOrigin_[drag], rayDirection_[drag], surface, false);
-                if (!hit.valid)
-                    return;
-                windowDragIndex_ = drag;
-                windowDragDepth_ = hit.distance;
-                windowDragOffset_ = panel_.pose.position - hit.world;
-                if (ui_.settings.follow == FollowMode::FollowView) {
-                    ui_.settings.follow = FollowMode::World;
-                    ui_.saveRequested = true;
-                    ui_.invalidate();
-                }
-                log("Moving window");
+    void cancelApplicationInput(int hand, XrTime time) {
+        ControllerInput input;
+        input.hand = hand;
+        input.timeNs = time;
+        ui_.controllerInput(input); // Preferred hook, otherwise the legacy controller hook.
+        if (ui_.applicationRay)
+            ui_.applicationRay(hand, {}, {}, false, false, {}, 0);
+    }
+    void applyHaptic(int hand) {
+        if (!ui_.hapticRequested[hand])
+            return;
+        ui_.hapticRequested[hand] = false;
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = haptic_;
+        info.subactionPath = hands_[hand];
+        XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+        vibration.duration = 25'000'000;
+        vibration.amplitude = .18f;
+        vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+        XrResult result =
+            xrApplyHapticFeedback(session_, &info, reinterpret_cast<XrHapticBaseHeader *>(&vibration));
+        if (XR_FAILED(result))
+            __android_log_print(ANDROID_LOG_WARN, "CyVR", "Haptic unavailable: %d", result);
+    }
+    bool manipulateWindow(int hand, const WindowPointer &pointer, bool down, XrTime time) {
+        auto result = windowMotion_.update(hand, pointer, panel_, headPose_, headValid_, ui_.window);
+        if (!result.consumed)
+            return false;
+        if (result.started) {
+            windowSelectionSuppressed_[hand] = true;
+            if (ui_.settings.follow == FollowMode::FollowView) {
+                ui_.settings.follow = FollowMode::FaceViewer;
+                ui_.saveRequested = true;
             }
-            Vec3 position = rayOrigin_[drag] + rayDirection_[drag] * windowDragDepth_ + windowDragOffset_;
-            XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-            if (XR_SUCCEEDED(xrLocateSpace(view_, local_, time, &head)) &&
-                (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-                Vec3 h = poseOf(head.pose).position, offset = position - h;
-                float distance = length(offset);
-                if (distance < .8f || distance > 3.f)
-                    position = h + normalized(offset) * std::clamp(distance, .8f, 3.f);
-            }
-            panel_.pose.position = position;
-            positionAccessories();
-        } else if (windowDragIndex_ >= 0) {
-            windowDragIndex_ = -1;
-            if (headValid_)
-                panel_.pose.orientation = faceViewer(panel_.pose.position, headPose_.position);
-            positionAccessories();
-            ui_.notify("toast.window_placed");
+            ui_.hapticRequested[hand] = ui_.settings.haptics;
+            log(result.resizing      ? "Resizing window: edge grip"
+                : result.pointerDrag ? "Moving window: handle"
+                                     : "Moving window: surface grip");
         }
+        if (result.changed || result.started || result.ended)
+            positionAccessories();
+        cancelApplicationInput(hand, time);
+        if (result.ended && down) {
+            ui_.pointer(hand, {-100, -100}, false);
+        } else if (result.pointerDrag) {
+            auto hit = pointerHit(hand, true);
+            ui_.pointer(hand, hit.valid ? hit.pixels : Vec2{-100, -100}, down);
+        } else {
+            if (down)
+                windowSelectionSuppressed_[hand] = true;
+            ui_.pointer(hand, {-100, -100}, false);
+            ui_.updateDockPointer(hand, pointer.hit.valid ? pointer.hit.pixels : Vec2{-100, -100});
+        }
+        pressed_[hand] = down;
+        if (result.ended)
+            ui_.notify(result.resizing ? "toast.window_resized" : "toast.window_placed");
+        applyHaptic(hand);
+        return true;
     }
     void input(XrTime time) {
         spatial_.clear();
@@ -1007,25 +1046,34 @@ class QuestApp {
                 hits_[i] = {};
                 pressed_[i] = false;
                 wakeSuppressed_[i] = false;
-                if(ui_.applicationController)ui_.applicationController(i,{},0,0,{},false);
+                cancelApplicationInput(i, time);
                 ui_.pointer(i, {-100, -100}, false);
             }
-            windowDragIndex_ = -1;
+            windowMotion_.cancel();
+            for(auto &ray:handGrabRays_)ray.reset();
+            windowSelectionSuppressed_.fill(true);
+            lastInputTime_ = 0;
+            ui_.setWindowFeedback(0, false, false);
             return;
         }
         XrActiveActionSet active{actionSet_, XR_NULL_PATH};
         XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
         sync.countActiveActionSets = 1;
         sync.activeActionSets = &active;
-        XrResult result = xrSyncActions(session_, &sync);
-        check(result, "sync actions");
-        if (booleanAction(showInterface_)) ui_.revealInterface();
-        if (focused_ && booleanAction(recenter_) && !ui_.revealInterface())
+        check(xrSyncActions(session_, &sync), "sync actions");
+        if (booleanAction(showInterface_))
+            ui_.revealInterface();
+        if (booleanAction(recenter_) && !ui_.revealInterface())
             ui_.recenterRequested = true;
-        if (focused_ && booleanAction(debug_) && !ui_.revealInterface()) {
+        if (booleanAction(debug_) && !ui_.revealInterface()) {
             ui_.debugVisible = !ui_.debugVisible;
             ui_.invalidate();
         }
+        const float inputDelta = lastInputTime_ && time > lastInputTime_
+                                     ? std::clamp(float((time - lastInputTime_) * 1e-9), 0.f, .05f)
+                                     : 1.f / 72;
+        lastInputTime_ = time;
+        uint8_t hoveredEdges = 0;
         for (int i = 0; i < 2; i++) {
             hits_[i] = {};
             XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -1036,19 +1084,20 @@ class QuestApp {
             get.action = trigger_;
             XrActionStateFloat trigger{XR_TYPE_ACTION_STATE_FLOAT};
             check(xrGetActionStateFloat(session_, &get, &trigger), "trigger state");
-            bool down = focused_ && trigger.isActive && trigger.currentState > (pressed_[i] ? .35f : .55f);
-            bool controllerDown = down;
+            bool down = trigger.isActive && trigger.currentState > (pressed_[i] ? .35f : .55f);
+            const bool controllerDown = down;
+            bool usingHand=false;
+            float trackedGrip=0;
             Pose applicationPose{};
-            constexpr XrSpaceLocationFlags valid =
+            constexpr auto valid =
                 XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
             if (aim.isActive) {
                 XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
                 check(xrLocateSpace(aimSpaces_[i], local_, time, &location), "locate pointer");
                 if ((location.locationFlags & valid) == valid) {
-                    Pose aimPose = poseOf(location.pose);
-                    applicationPose=aimPose;
-                    rayOrigin_[i] = aimPose.position;
-                    rayDirection_[i] = rotate(aimPose.orientation, {0, 0, -1});
+                    applicationPose = poseOf(location.pose);
+                    rayOrigin_[i] = applicationPose.position;
+                    rayDirection_[i] = rotate(applicationPose.orientation, {0, 0, -1});
                     rayValid_[i] = true;
                     XrSpaceLocation grip{XR_TYPE_SPACE_LOCATION};
                     check(xrLocateSpace(gripSpaces_[i], local_, time, &grip), "locate hand");
@@ -1060,23 +1109,80 @@ class QuestApp {
             }
             if (!rayValid_[i]) {
                 down = false;
-                rayValid_[i] = trackedHand(i, time, down);
-            }
+                usingHand=true;
+                rayValid_[i] = trackedHand(i, time, down, trackedGrip);
+            } else handGrabRays_[i].reset();
             if (!rayValid_[i])
                 down = false;
-            if(ui_.applicationController){
-                get.action=videoStick_;
-                XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
-                check(xrGetActionStateVector2f(session_,&get,&stick),"application stick");
-                get.action=videoSqueeze_;
-                XrActionStateFloat squeeze{XR_TYPE_ACTION_STATE_FLOAT};
-                check(xrGetActionStateFloat(session_,&get,&squeeze),"application grip");
-                const bool consumed=ui_.applicationController(i,stick.isActive?Vec2{stick.currentState.x,stick.currentState.y}:Vec2{},
-                  trigger.isActive?trigger.currentState:0,squeeze.isActive?squeeze.currentState:0,applicationPose,rayValid_[i]&&aim.isActive);
-                if(consumed){ui_.pointer(i,{-100,-100},false);pressed_[i]=false;continue;}
+            // Grip and stick belong to the window host even without application input hooks.
+            get.action = videoStick_;
+            XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+            check(xrGetActionStateVector2f(session_, &get, &stick), "thumbstick state");
+            get.action = videoSqueeze_;
+            XrActionStateFloat squeeze{XR_TYPE_ACTION_STATE_FLOAT};
+            check(xrGetActionStateFloat(session_, &get, &squeeze), "grip state");
+            const Vec2 axes = stick.isActive ? Vec2{stick.currentState.x, stick.currentState.y} : Vec2{};
+            const float grip = usingHand ? trackedGrip : squeeze.isActive ? squeeze.currentState : 0;
+            const bool windowAllowed =
+                !ui_.interfaceHidden && !ui_.compactInterface && panelPlaced_ && !panelViewRelative_;
+            const int capture = ui_.captured(i);
+            const bool pointerDrag = down && (capture == 600 || capture == 605);
+            WindowPointer pointer;
+            pointer.origin = rayOrigin_[i];
+            pointer.direction = rayDirection_[i];
+            pointer.valid = rayValid_[i] && windowAllowed;
+            // Window grabs use the complete physical surface, independently of widget capture.
+            pointer.hit = windowAllowed && ui_.windowState == WindowState::Open && rayValid_[i]
+                              ? intersectPanel(rayOrigin_[i], rayDirection_[i], panel_)
+                              : Hit{};
+            pointer.onPanel = pointer.hit.valid;
+            if ((pointerDrag && grip < .65f) || !pointer.hit.valid)
+                pointer.hit = pointerHit(i, pointerDrag);
+            pointer.pointerDrag = pointerDrag;
+            pointer.grip = grip;
+            pointer.stick = axes;
+            pointer.deltaSeconds = inputDelta;
+            if (windowAllowed && pointer.valid && pointer.onPanel)
+                hoveredEdges |= windowEdgesAt(pointer.hit.pixels, panel_, ui_.window);
+            if (manipulateWindow(i, pointer, down, time))
+                continue;
+            if (rayValid_[i] && !controllerDown && !down)
+                windowSelectionSuppressed_[i] = false;
+            if (windowSelectionSuppressed_[i]) {
+                cancelApplicationInput(i, time);
+                ui_.pointer(i, {-100, -100}, false);
+                pressed_[i] = down;
+                continue;
+            }
+            if (ui_.applicationInput || ui_.applicationController || ui_.applicationRay) {
+                ControllerInput input;
+                input.hand = i;
+                input.stick = axes;
+                input.trigger = trigger.isActive ? trigger.currentState : (down ? 1.f : 0.f);
+                input.grip = grip;
+                input.pose = applicationPose;
+                input.poseValid = rayValid_[i] && aim.isActive;
+                input.pointer = pointerHit(i, true);
+                input.rayOrigin = rayOrigin_[i];
+                input.rayDirection = rayDirection_[i];
+                input.rayValid = rayValid_[i];
+                input.deltaSeconds = inputDelta;
+                input.timeNs = time;
+                if (ui_.controllerInput(input)) {
+                    ui_.pointer(i, {-100, -100}, false);
+                    pressed_[i] = false;
+                    continue;
+                }
+                if (ui_.applicationRay &&
+                    ui_.applicationRay(i, rayOrigin_[i], rayDirection_[i], down, rayValid_[i], axes, grip)) {
+                    ui_.pointer(i, {-100, -100}, false);
+                    pressed_[i] = down;
+                    continue;
+                }
             }
             const bool selecting = controllerDown || down;
-            if (!selecting) wakeSuppressed_[i] = false;
+            if (!selecting)
+                wakeSuppressed_[i] = false;
             if (selecting && !pressed_[i] && ui_.revealInterface())
                 wakeSuppressed_[i] = true;
             if (wakeSuppressed_[i]) {
@@ -1084,38 +1190,28 @@ class QuestApp {
                 pressed_[i] = selecting;
                 continue;
             }
-            Hit planeHit = pointerHit(i, true);
-            ui_.pointer(i, planeHit.valid ? planeHit.pixels : Vec2{-100, -100}, down);
+            auto hit = pointerHit(i, true);
+            ui_.pointer(i, hit.valid ? hit.pixels : Vec2{-100, -100}, down);
             pressed_[i] = down;
-            if (ui_.hapticRequested[i]) {
-                ui_.hapticRequested[i] = false;
-                XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
-                info.action = haptic_;
-                info.subactionPath = hands_[i];
-                XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
-                vibration.duration = 25'000'000;
-                vibration.amplitude = .18f;
-                vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
-                XrResult h = xrApplyHapticFeedback(session_, &info,
-                                                   reinterpret_cast<XrHapticBaseHeader *>(&vibration));
-                if (XR_FAILED(h))
-                    __android_log_print(ANDROID_LOG_WARN, "CyVR", "Haptic unavailable: %d", h);
-            }
+            applyHaptic(i);
         }
         if (ui_.interfaceHidden) {
-            spatial_.clear(); // No controller/hand meshes, rays or cursors over the movie.
+            spatial_.clear();
             hits_.fill({});
-            windowDragIndex_ = -1;
+            windowMotion_.cancel();
+            ui_.setWindowFeedback(0, false, false);
             return;
         }
-        moveWindow(time);
+        ui_.setWindowFeedback(windowMotion_.edges() ? windowMotion_.edges() : hoveredEdges,
+                              windowMotion_.active(), windowMotion_.active() && windowMotion_.edges());
         for (int i = 0; i < 2; i++)
             if (rayValid_[i]) {
                 hits_[i] = pointerHit(i, false);
                 Vec3 end = hits_[i].valid ? hits_[i].world : rayOrigin_[i] + rayDirection_[i] * 2.5f;
                 if (ui_.settings.rays)
-                    spatial_.bone(rayOrigin_[i] + rayDirection_[i] * .025f, end, .0010f,
-                                  Color::hex(pressed_[i] ? 0xc9fff0 : 0x86e7cf, .9f), 6);
+                    spatial_.bone(
+                        rayOrigin_[i] + rayDirection_[i] * .025f, end, .0010f,
+                        Color::hex(pressed_[i] || windowMotion_.hand() == i ? 0xc9fff0 : 0x86e7cf, .9f), 6);
             }
     }
     Hit pointerHit(int i, bool capture) {
@@ -1128,6 +1224,8 @@ class QuestApp {
         if (ui_.windowState == WindowState::Open && !inDock)
             main = intersectPanel(rayOrigin_[i], rayDirection_[i], panel_, !(capture && id));
         Hit dock = ui_.compactInterface ? Hit{} : intersectPanel(rayOrigin_[i], rayDirection_[i], dockPanel_, !(capture && inDock && id));
+        if(dock.valid && !(capture&&inDock&&id) &&
+           !ui_.dockHitTest({dock.pixels.x+dockOriginX,dock.pixels.y+dockOriginY}))dock={};
         if (dock.valid && (!main.valid || dock.distance < main.distance)) {
             dock.pixels.x += dockOriginX;
             dock.pixels.y += dockOriginY;

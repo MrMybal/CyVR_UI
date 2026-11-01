@@ -83,6 +83,9 @@ std::string wrap(const DrawList &d, float size, float maxWidth, std::string_view
 }
 // Every icon shares one 24-unit grid and stroke, so only size and color vary between surfaces.
 void drawIconImpl(DrawList &d, Icon icon, Vec2 center, float size, Color c, float weight = 2) {
+    if (d.capture) { PaintCommand p; p.kind=PaintKind::Icon; p.bounds={center.x-size/2,center.y-size/2,size,size}; p.color=c; p.icon=int(icon); p.stroke=weight;
+        d.record(std::move(p),[&]{drawIconImpl(d,icon,center,size,c,weight);}); return; }
+
     const float s = size / 24, stroke = weight * s;
     auto at = [&](float x, float y) { return Vec2{center.x + (x - 12) * s, center.y + (y - 12) * s}; };
     std::array<Vec2, 40> points;
@@ -272,6 +275,9 @@ void drawIconImpl(DrawList &d, Icon icon, Vec2 center, float size, Color c, floa
     }
 }
 void logo(DrawList &d, Vec2 center, Color c) {
+    if (d.capture) { PaintCommand p; p.kind=PaintKind::Logo; p.bounds={center.x-15,center.y-15,45,30}; p.color=c;
+        d.record(std::move(p),[&]{logo(d,center,c);}); return; }
+
     std::array<Vec2, 17> arc;
     for (size_t i = 0; i < arc.size(); i++) {
         float a = (48.f + 264.f * i / (arc.size() - 1)) * pi / 180;
@@ -291,8 +297,10 @@ void drawIcon(DrawList& d,Icon icon,Vec2 center,float size,Color color,float wei
 void drawLogo(DrawList& d,Vec2 center,Color color){logo(d,center,color);}
 ThemeColors themeColors(const Settings& settings){palette(settings);return {mint,white,muted,lineColor,panelColor,surfaceColor,hoverColor,selectedColor};}
 void UiModel::drawMain(DrawList &d) {
-    if (renderApplication && renderApplication(d))
+    if (renderApplication && renderApplication(d)) {
+        drawWindowAffordances(d);
         return;
+    }
     d.clear();
     widgets_.clear();
     palette(settings);
@@ -348,7 +356,7 @@ void UiModel::drawMain(DrawList &d) {
             d.text(handle.x + (handle.w - contentWidth) * .5f + 38, textTop(39, 20), 20, moveLabel, white);
         } else
             drawIcon(d, Icon::Move, {714, 39}, 26, muted);
-        addWidget(605, handle, Control::Drag);
+        addWidget(605, handle, Control::Drag, window.movable);
     }
     {
         const char *context = contextLabel.empty() ? tr("header.personal") : contextLabel.c_str();
@@ -429,7 +437,7 @@ void UiModel::drawMain(DrawList &d) {
     d.text(28, 672, 20, sidebarTitle.empty() ? tr("brand.custom") : sidebarTitle, white);
     d.text(28, 706, 17, sidebarSubtitle.empty() ? tr("brand.open") : sidebarSubtitle, muted);
     d.text(28, 852, 15, immersive ? "C++ / OPENXR" : "C++ / ANDROID", muted);
-    d.text(28, 878, 15, "VULKAN / 0.8", muted);
+    d.text(28, 878, 15, "VULKAN / 0.9", muted);
     if (renderContent && renderContent(d)) {
         // Application owns only the content region; chrome, modal and comfort remain shared.
     } else if (page == Page::Home) {
@@ -575,6 +583,7 @@ void UiModel::drawMain(DrawList &d) {
                        settings.requestedHz == hz, available);
             }
             button(330, third(2, 778, 60), tr("settings.restore"));
+            if(immersive)setting(394,{x,852,width,50},tr("settings.minimal_dock"),settings.minimalDock);
         } else if (settingsTab == 1) {
             label(d, x, 292, tr("appearance.theme"));
             for (int i = 0; i < 3; i++)
@@ -711,6 +720,7 @@ void UiModel::drawMain(DrawList &d) {
         button(502, {536, 586, 242, 67}, tr("common.cancel"));
         button(501, {794, 586, 298, 67}, modalConfirm.empty() ? tr("common.confirm") : modalConfirm, true);
     }
+    drawWindowAffordances(d);
 }
 void UiModel::drawDebug(DrawList &d) {
     if(renderApplicationDebug&&renderApplicationDebug(d))return;
@@ -738,12 +748,59 @@ void UiModel::drawDebug(DrawList &d) {
     d.text(28, 656, 21, tr("hud.controls"), mint);
     d.text(28, 705, 17, tr("hud.measurements"), muted);
 }
+bool UiModel::dockHitTest(Vec2 p) const {
+    if (presentation != Presentation::Immersive || interfaceHidden || compactInterface)
+        return false;
+    if (renderApplicationDock)
+        return Rect{float(dockOriginX), float(dockOriginY), float(dockWidth), float(dockHeight)}.contains(p);
+    // A fixed hover zone includes the places where the side icons will appear.
+    return Rect{dockOriginX + 64.f, dockOriginY + 8.f, 416, 76}.contains(p);
+}
+void UiModel::updateDockPointer(size_t index, Vec2 p) {
+    if (index >= dockHovered_.size())
+        return;
+    dockHovered_[index] = dockHitTest(p);
+    if (dockHovered_[index])
+        dockHoldUntil_ = time_ + .55;
+}
+void UiModel::setWindowFeedback(uint8_t edges, bool grabbed, bool resizing) {
+    if (windowEdges != edges || windowGrabbed != grabbed || windowResizing != resizing) {
+        windowEdges = edges;
+        windowGrabbed = grabbed;
+        windowResizing = resizing;
+        invalidate();
+    }
+}
+void UiModel::drawWindowAffordances(DrawList &d) const {
+    if (presentation != Presentation::Immersive || interfaceHidden || compactInterface ||
+        windowState != WindowState::Open)
+        return;
+    auto c = Color::hex(settings.theme == Theme::Light ? 0x126854 : 0x86e7cf, .9f);
+    const float width = viewportSize.x, height = viewportSize.y;
+    if (windowGrabbed && !windowResizing)
+        d.border({3, 3, width - 6, height - 6}, c, 28, 2);
+    if (!window.resizable)
+        return;
+    if (windowEdges & EdgeLeft)
+        d.line({5, 32}, {5, height - 32}, c, 3);
+    if (windowEdges & EdgeRight)
+        d.line({width - 5, 32}, {width - 5, height - 32}, c, 3);
+    if (windowEdges & EdgeTop)
+        d.line({32, 5}, {width - 32, 5}, c, 3);
+    if (windowEdges & EdgeBottom)
+        d.line({32, height - 5}, {width - 32, height - 5}, c, 3);
+}
 void UiModel::drawDock(DrawList &d) {
     palette(settings);
     d.clear();
-    if (interfaceHidden) { widgets_.clear(); return; }
-    if (compactInterface) return;
-    if (presentation != Presentation::Immersive) return;
+    if (interfaceHidden) {
+        widgets_.clear();
+        return;
+    }
+    if (compactInterface)
+        return;
+    if (presentation != Presentation::Immersive)
+        return;
     widgets_.erase(std::remove_if(widgets_.begin(), widgets_.end(),
                                   [](auto &w) { return w.id >= 600 && w.id < 700 && w.id != 605; }),
                    widgets_.end());
@@ -753,33 +810,42 @@ void UiModel::drawDock(DrawList &d) {
                        widgets_.end());
     if (renderApplicationDock && renderApplicationDock(d))
         return;
-    frame(d, {0, 0, float(dockWidth), float(dockHeight)},
-          Color::hex(settings.theme == Theme::Light ? 0xe4eef1 : 0x17272f, .97f), 32);
+    const float reveal = dockReveal();
+    // This bar never changes its geometry, opacity or position on hover.
+    d.rect({160, 40, 160, 8}, alpha(mint, .8f), 4);
+    addWidget(600, {dockOriginX + 148.f, dockOriginY + 24.f, 184, 42}, Control::Drag, window.movable);
+    if (reveal < .001f)
+        return;
+    auto fade = [&](Color c) {
+        c.a *= reveal;
+        return c;
+    };
     std::string hint;
-    auto control = [&](int id, Rect r, Icon glyph, const char *text, bool selected = false,
-                       Control type = Control::Button) {
-        if (pressed(id) || hover_ == id || selected)
-            d.rect(r, selected || pressed(id) ? selectedColor : hoverColor, 17);
-        drawIcon(d, glyph, {r.x + r.w * .5f, r.y + r.h * .5f}, 30, selected ? mint : white);
+    auto control = [&](int id, Rect r, Icon glyph, const char *text, bool selected = false) {
+        Color fill = selected ? selectedColor
+                     : (pressed(id) || hover_ == id)
+                         ? hoverColor
+                         : Color::hex(settings.theme == Theme::Light ? 0xe4eef1 : 0x17272f, .9f);
+        d.rect(r, fade(fill), r.h * .5f);
+        drawIcon(d, glyph, {r.x + r.w * .5f, r.y + r.h * .5f}, 28, fade(selected ? mint : white));
         if (hover_ == id)
             hint = text;
-        addWidget(id, {r.x + dockOriginX, r.y + dockOriginY, r.w, r.h}, type);
+        if (reveal >= .8f)
+            addWidget(id, {r.x + dockOriginX, r.y + dockOriginY, r.w, r.h}, Control::Button);
     };
     static constexpr Icon placement[]{Icon::Pin, Icon::Eye, Icon::Follow};
-    control(600, {10, 6, 112, 58}, Icon::Move, tr("dock.move"), false, Control::Drag);
-    control(610, {130, 6, 112, 58}, placement[int(settings.follow)],
+    control(610, {88, 16, 56, 56}, placement[int(settings.follow)],
             settings.follow == FollowMode::World        ? tr("dock.world")
             : settings.follow == FollowMode::FaceViewer ? tr("settings.face")
                                                         : tr("settings.follow"),
             settings.follow != FollowMode::World);
-    d.line({246, 22}, {246, 48}, lineColor, 1);
     if (windowState == WindowState::Open) {
-        control(611, {250, 6, 104, 58}, Icon::Minimize, tr("dock.minimize"));
-        control(612, {362, 6, 108, 58}, Icon::Close, tr("dock.close"));
+        control(611, {336, 16, 56, 56}, Icon::Minimize, tr("dock.minimize"));
+        control(612, {408, 16, 56, 56}, Icon::Close, tr("dock.close"));
     } else
-        control(613, {250, 6, 220, 58}, windowState == WindowState::Closed ? Icon::Open : Icon::Restore,
+        control(613, {336, 16, 56, 56}, windowState == WindowState::Closed ? Icon::Open : Icon::Restore,
                 windowState == WindowState::Closed ? tr("dock.open") : tr("dock.restore"));
     if (!hint.empty())
-        d.text((dockWidth - d.textWidth(16, hint)) * .5f, 68, 16, hint, muted);
+        d.text((dockWidth - d.textWidth(16, hint)) * .5f, 70, 16, hint, fade(muted));
 }
 } // namespace cyvr

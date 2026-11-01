@@ -121,6 +121,8 @@ static const Glyph &glyph(uint32_t code) {
     return it != std::end(glyphs) && it->code == code ? *it : glyphs['?' - 32];
 }
 void DrawList::triangle(Vec2 a, Vec2 b, Vec2 c, Color color) {
+    if (capture) { PaintCommand cpt; cpt.kind=PaintKind::Triangle; cpt.color=color; cpt.points={a,b,c};
+        record(std::move(cpt), [&]{ triangle(a,b,c,color); }); return; }
     for (auto p : {a, b, c})
         vertices.push_back({p.x, p.y, .0015f, .0015f, color.r, color.g, color.b, color.a});
 }
@@ -150,6 +152,8 @@ static void corners(std::vector<Vertex> &out, Rect r, float radius, Color color,
     shape(out, {r.x, bottom, radius, radius}, {-1, 0}, {0, 1}, color, inner);
 }
 void DrawList::rect(Rect r, Color color, float radius) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Rect; c.bounds=r; c.color=color; c.radius=radius;
+        record(std::move(c), [&]{ rect(r,color,radius); }); return; }
     if (r.w <= 0 || r.h <= 0)
         return;
     radius = std::min({radius, r.w * .5f, r.h * .5f});
@@ -167,6 +171,8 @@ void DrawList::rect(Rect r, Color color, float radius) {
     corners(vertices, r, radius, color, 0);
 }
 void DrawList::border(Rect r, Color color, float radius, float width) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Border; c.bounds=r; c.color=color; c.radius=radius; c.stroke=width;
+        record(std::move(c), [&]{ border(r,color,radius,width); }); return; }
     if (r.w <= 0 || r.h <= 0 || width <= 0)
         return;
     radius = std::max(width, std::min({radius, r.w * .5f, r.h * .5f}));
@@ -178,9 +184,13 @@ void DrawList::border(Rect r, Color color, float radius, float width) {
     corners(vertices, r, radius, color, (radius - width) / radius);
 }
 void DrawList::circle(Vec2 c, float radius, Color color) {
+    if (capture) { PaintCommand p; p.kind=PaintKind::Circle; p.bounds={c.x-radius,c.y-radius,2*radius,2*radius}; p.color=color;
+        record(std::move(p), [&]{ circle(c,radius,color); }); return; }
     ring(c, radius, radius, color);
 }
 void DrawList::ring(Vec2 c, float radius, float width, Color color) {
+    if (capture) { PaintCommand p; p.kind=PaintKind::Ring; p.bounds={c.x-radius,c.y-radius,2*radius,2*radius}; p.color=color; p.stroke=width;
+        record(std::move(p), [&]{ ring(c,radius,width,color); }); return; }
     if (radius <= 0)
         return;
     // One pixel of margin keeps the edge filter from flattening the four tangent points.
@@ -203,6 +213,8 @@ static void capsule(std::vector<Vertex> &out, Vec2 a, Vec2 b, Color color, float
         out.push_back(vertex);
 }
 void DrawList::polyline(const Vec2 *points, size_t count, Color color, float width, bool closed) {
+    if (capture) { PaintCommand p; p.kind=PaintKind::Path; p.color=color; p.stroke=width; p.closed=closed; p.points.assign(points,points+count);
+        record(std::move(p), [&]{ polyline(points,count,color,width,closed); }); return; }
     for (size_t i = 0; i < count; i++) {
         circle(points[i], width * .5f, color);
         if (i + 1 < count)
@@ -238,6 +250,8 @@ static void roundedFan(DrawList &d, Rect r, Color color, float radius) {
     d.triangle(middle, previous, first, color);
 }
 void DrawList::line(Vec2 a, Vec2 b, Color color, float width) {
+    if (capture) { PaintCommand p; p.kind=PaintKind::Line; p.color=color; p.stroke=width; p.points={a,b};
+        record(std::move(p), [&]{ line(a,b,color,width); }); return; }
     float dx = b.x - a.x, dy = b.y - a.y, l = std::sqrt(dx * dx + dy * dy);
     if (l < .001f)
         return;
@@ -253,6 +267,8 @@ void DrawList::line(Vec2 a, Vec2 b, Color color, float width) {
     capsule(vertices, a, b, color, width);
 }
 void DrawList::image(Rect r, Rect uv, Color tint, float radius) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Image; c.bounds=r; c.uv=uv; c.color=tint; c.radius=radius;
+        record(std::move(c), [&]{ image(r,uv,tint,radius); }); return; }
     if (r.w <= 0 || r.h <= 0) return;
     const auto first = vertices.size();
     // Texture coordinates are derived from positions, so images keep plain geometry.
@@ -264,10 +280,14 @@ void DrawList::image(Rect r, Rect uv, Color tint, float radius) {
     }
 }
 void DrawList::video(Rect r, Rect uv) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Video; c.bounds=r; c.uv=uv;
+        record(std::move(c), [&]{ video(r,uv); }); return; }
     const auto first=vertices.size();image(r,uv);
     for(auto i=first;i<vertices.size();++i)vertices[i].u-=2.f;
 }
 void DrawList::overlay(Rect r, Rect uv) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Overlay; c.bounds=r; c.uv=uv;
+        record(std::move(c), [&]{ overlay(r,uv); }); return; }
     const auto first=vertices.size();image(r,uv);
     for(auto i=first;i<vertices.size();++i)vertices[i].u-=4.f;
 }
@@ -278,6 +298,8 @@ float DrawList::textWidth(float size, std::string_view text) const {
     return width;
 }
 void DrawList::text(float x, float y, float size, std::string_view value, Color color) {
+    if (capture) { PaintCommand c; c.kind=PaintKind::Text; c.bounds={x,y,0,0}; c.color=color; c.fontSize=size; c.text=value;
+        record(std::move(c), [&]{ text(x,y,size,value,color); }); return; }
     float start = x, scale = size / 48;
     for (uint32_t code : decodeUtf8(value)) {
         if (code == '\n') {
@@ -386,7 +408,17 @@ void UiModel::setLanguage(std::string_view language) {
     invalidate();
 }
 void UiModel::tick(double seconds) {
+    const float delta=float(std::clamp(seconds-time_,0.,.1));
     time_ = seconds;
+    bool dockCaptured=false;
+    for(const auto &p:pointers_)dockCaptured=dockCaptured||(p.down&&isDockWidget(p.capture));
+    bool requested=dockHovered_[0]||dockHovered_[1]||dockCaptured||seconds<dockHoldUntil_;
+    if(!settings.minimalDock||presentation!=Presentation::Immersive||interfaceHidden||compactInterface||renderApplicationDock)requested=false;
+    const float target=requested?1.f:0.f;
+    const float previous=dockReveal_;
+    dockReveal_=settings.reducedMotion?target:
+        dockReveal_+std::clamp(target-dockReveal_,-delta*7.f,delta*10.f);
+    if(std::abs(previous-dockReveal_)>.0001f)invalidate();
     if (applicationTick)
         applicationTick(seconds);
     if (!toast_.empty() && time_ > toastUntil_) {
@@ -403,6 +435,7 @@ void UiModel::setInterfaceHidden(bool hidden) {
     interfaceHidden = hidden;
     widgets_.clear();
     pointers_ = {};
+    dockHovered_={};dockReveal_=0;dockHoldUntil_=0;
     hover_ = 0;
     hapticRequested[0] = hapticRequested[1] = false;
     if (!hidden) windowState = WindowState::Open;
@@ -416,7 +449,9 @@ bool UiModel::revealInterface() {
 void UiModel::pointer(size_t index, Vec2 pos, bool pressed) {
     if (index >= pointers_.size())
         return;
+    updateDockPointer(index,pos);
     auto &pointer = pointers_[index];
+    if (applicationPointerState) applicationPointerState(index, pos, pressed);
     if (!interfaceHidden && !modalOpen && !pointer.capture && applicationPointer && applicationPointer(index, pos, pressed))
         return;
     if (interfaceHidden) {
@@ -555,7 +590,7 @@ void UiModel::action(int id) {
         return;
     }
     if ((id >= 340 && id <= 342) || (id >= 360 && id <= 362) || (id >= 370 && id <= 372) ||
-        (id >= 380 && id <= 383) || (id >= 390 && id <= 392)) {
+        (id >= 380 && id <= 383) || (id >= 390 && id <= 392) || id == 394) {
         if (id >= 340 && id <= 342)
             settingsTab = id - 340;
         if (id >= 360 && id <= 362)
@@ -572,6 +607,7 @@ void UiModel::action(int id) {
         if (id >= 390 && id <= 392) {
             settings.follow = FollowMode(id - 390);
         }
+        if(id==394){settings.minimalDock=!settings.minimalDock;dockReveal_=0;dockHovered_={};dockHoldUntil_=0;}
         saveRequested = true;
         invalidate();
         return;

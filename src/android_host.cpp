@@ -49,10 +49,13 @@ class PanelApp {
     DrawList draw_;
     bool resumed_{}, visible_{}, dirty_{true}, quit_{}, rendererRecreated_{true}, swapchainInvalid_{}, closing_{};
     int32_t touchId_{-1};
+    Vec2 pointerPosition_{-100,-100};
+    std::array<Vec2,2> panelSticks_{};
     uint64_t revision_{};
     std::string storage_;
     using Clock = std::chrono::steady_clock;
     Clock::time_point start_{Clock::now()}, nextMemorySample_{};
+    Clock::time_point lastControllerSample_{Clock::now()};
 
     static void command(android_app *app, int32_t cmd) {
         auto &self = *static_cast<PanelApp *>(app->userData);
@@ -83,6 +86,7 @@ class PanelApp {
         case APP_CMD_PAUSE:
         case APP_CMD_LOST_FOCUS:
             self.ui_.pointer(0, {-100, -100}, false);
+            self.pointerPosition_={-100,-100};self.panelSticks_={};
             self.touchId_ = -1;
             if (cmd == APP_CMD_PAUSE)
                 self.resumed_ = false;
@@ -93,6 +97,9 @@ class PanelApp {
     static int32_t input(android_app *app, AInputEvent *event) {
         auto &self = *static_cast<PanelApp *>(app->userData);
         if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY) {
+            const auto key=AKeyEvent_getKeyCode(event);
+            if((key==AKEYCODE_DPAD_UP || key==AKEYCODE_DPAD_DOWN) && AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_DOWN &&
+                self.ui_.scroll(self.pointerPosition_,{0,key==AKEYCODE_DPAD_UP?-72.f:72.f}))return 1;
             if (AKeyEvent_getKeyCode(event) != AKEYCODE_BACK)
                 return 0;
             if (AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP) {
@@ -110,13 +117,25 @@ class PanelApp {
         }
         if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION)
             return 0;
+        if((AInputEvent_getSource(event)&AINPUT_SOURCE_JOYSTICK)==AINPUT_SOURCE_JOYSTICK){
+            self.panelSticks_[0]={AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_X,0),-AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Y,0)};
+            self.panelSticks_[1]={AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Z,0),-AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RZ,0)};
+            return 1;
+        }
         const int action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+        if(action==AMOTION_EVENT_ACTION_SCROLL){
+            const auto point=self.mapping_.toCanvas({AMotionEvent_getX(event,0),AMotionEvent_getY(event,0)});
+            self.pointerPosition_=point;
+            self.ui_.pointer(0,point,false);
+            return self.ui_.scroll(point,{-72*AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_HSCROLL,0),-72*AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_VSCROLL,0)})?1:0;
+        }
         const size_t changed = (AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
                                AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
         if (action == AMOTION_EVENT_ACTION_DOWN)
             self.touchId_ = AMotionEvent_getPointerId(event, 0);
         if (action == AMOTION_EVENT_ACTION_CANCEL || action == AMOTION_EVENT_ACTION_HOVER_EXIT) {
             self.ui_.pointer(0, {-100, -100}, false);
+            self.pointerPosition_={-100,-100};
             self.touchId_ = -1;
             return 1;
         }
@@ -127,7 +146,8 @@ class PanelApp {
             const bool up = action == AMOTION_EVENT_ACTION_UP ||
                             (action == AMOTION_EVENT_ACTION_POINTER_UP && i == changed);
             Vec2 position{AMotionEvent_getX(event, i), AMotionEvent_getY(event, i)};
-            self.ui_.pointer(0, self.mapping_.toCanvas(position), !up && !hover);
+            self.pointerPosition_=self.mapping_.toCanvas(position);
+            self.ui_.pointer(0, self.pointerPosition_, !up && !hover);
             if (up)
                 self.touchId_ = -1;
             return 1;
@@ -436,6 +456,7 @@ class PanelApp {
             // Multi-window apps may keep drawing a visible but unfocused panel.
             int timeout = (resumed_ || (config_.renderWhileVisible && visible_)) && app_->window
                 ? (config_.graphics ? std::clamp(config_.graphics->pollTimeoutMs(),1,33) : 33) : -1;
+            if(timeout>0 && (std::abs(panelSticks_[0].y)>.22f || std::abs(panelSticks_[1].y)>.22f))timeout=std::min(timeout,16);
             while (ALooper_pollOnce(timeout, nullptr, &events, reinterpret_cast<void **>(&source)) >= 0) {
                 if (source)
                     source->process(app_, source);
@@ -446,6 +467,15 @@ class PanelApp {
             if (app_->destroyRequested)
                 break;
             ui_.tick(std::chrono::duration<double>(Clock::now() - start_).count());
+            const auto controllerNow=Clock::now();
+            const float controllerDelta=std::clamp(std::chrono::duration<float>(controllerNow-lastControllerSample_).count(),0.f,.05f);
+            lastControllerSample_=controllerNow;
+            if(resumed_ && app_->window && ui_.applicationInput)for(size_t hand=0;hand<2;++hand){
+                if(std::abs(panelSticks_[hand].x)<=.22f && std::abs(panelSticks_[hand].y)<=.22f)continue;
+                ControllerInput input;input.hand=hand;input.stick=panelSticks_[hand];input.deltaSeconds=controllerDelta;
+                input.pointer={Rect{0,0,1440,990}.contains(pointerPosition_),pointerPosition_,{},0};
+                ui_.controllerInput(input);
+            }
             if (ui_.saveRequested) {
                 ui_.saveRequested = false;
                 if (!saveSettings(storage_ + "/preferences.txt", ui_.settings))

@@ -50,6 +50,8 @@ Returning from immersion destroys the XR session before requesting Home with a p
 
 ### Application integration hooks
 
+Immersive window grip/edge gestures intersect the entire physical panel before application input, independently of widget capture. Tracked hands also supply a closed-hand grip, independently of their visual model. Set UiModel::window.movable/resizable to false when content owns grip. During a stock window gesture the host delivers neutral/invalid controller samples so content can cancel its active gesture. Compact or hidden application UI keeps its existing input ownership. See [window configuration](WINDOW_INTERACTIONS.md).
+
 `AndroidXrRenderExtension::beginXrFrame(XrTime, bool focused, bool shouldRender)` runs once after input updates and before scene/layer composition. Applications with an external immersive producer can publish predicted poses and input there. They must preserve the validity flags returned by OpenXR and must not infer tracked poses from session focus alone.
 
 `UiModel::applicationPointer(size_t index, Vec2 canvasPosition, bool pressed)` optionally consumes pointer events for embedded application content. It runs only while the interface is visible, no modal is open and no shared widget owns capture. A consuming application owns the continuation/cancellation of its gesture. Native UI controls and modal isolation remain the foundation's responsibility.
@@ -87,3 +89,9 @@ Window dimensions map to a centered 1440 × 990 logical canvas with matching inv
 In a 2D window, themes and frosted materials apply to the app's procedural backdrop. The renderer cannot blur other applications or the passthrough image. The HUD does not infer headset FPS from a window that redraws only when content changes.
 
 Hybrid activity categories, launch overrides and the Home pending-intent transition follow the [Meta hybrid apps documentation](https://developers.meta.com/vr/documentation/spatial-sdk/hybrid-apps-overview/). The manifest declares Horizon OS v69 as the minimum for these transitions; it embeds no Meta SDK.
+
+### Resolved controller input
+
+`UiModel::applicationInput(const ControllerInput&)` runs after the current controller ray has been intersected with the main panel/dock, before selection dispatch. It receives logical panel pixels, trigger/grip, thumbstick, LOCAL aim pose, ray validity, prediction time and frame delta together. Return false for pointer-preserving scrolling; return true to capture a spatial gesture and suppress UI selection. Pose validity is independent of the resolved pointer, so hand-ray hover can still route scrolling without a controller aim pose. The host reports an invalid sample on focus loss. `controllerInput()` is the shared dispatch entry point; when the new hook is absent, the previous `applicationController` hook remains supported.
+
+The 2D host forwards Android ACTION_SCROLL (including system-translated Quest joystick scrolling) as logical-pixel deltas through UiModel::applicationScroll / scroll(). Generic Android joystick axes are sampled continuously at the last system cursor position, without requiring an OpenXR pose. Focus loss clears held axes. Applications keep file scrolling separate from transport and zoom.

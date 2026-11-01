@@ -8,6 +8,7 @@ extern "C" void android_main(android_app *app) {
     app->activity->vm->AttachCurrentThread(&environment, nullptr);
     try {
         cyvr::AndroidAppConfig config;
+        config.version = 12;
         config.immersiveEnabled = CYVR_ENABLE_IMMERSIVE;
         config.viewFallback = true;
         cyvr::runAndroidApp(app, config);
