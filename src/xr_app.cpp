@@ -1123,8 +1123,11 @@ class QuestApp {
             check(xrGetActionStateFloat(session_, &get, &squeeze), "grip state");
             const Vec2 axes = stick.isActive ? Vec2{stick.currentState.x, stick.currentState.y} : Vec2{};
             const float grip = usingHand ? trackedGrip : squeeze.isActive ? squeeze.currentState : 0;
+            // Compact applications can still expose an explicit trigger drag handle (605).
+            // Keep the motion input armed before that handle is captured, but never allow
+            // a full-surface grip to move or resize the compact application's content.
             const bool windowAllowed =
-                !ui_.interfaceHidden && !ui_.compactInterface && panelPlaced_ && !panelViewRelative_;
+                !ui_.interfaceHidden && panelPlaced_ && !panelViewRelative_;
             const int capture = ui_.captured(i);
             const bool pointerDrag = down && (capture == 600 || capture == 605);
             WindowPointer pointer;
@@ -1132,14 +1135,16 @@ class QuestApp {
             pointer.direction = rayDirection_[i];
             pointer.valid = rayValid_[i] && windowAllowed;
             // Window grabs use the complete physical surface, independently of widget capture.
-            pointer.hit = windowAllowed && ui_.windowState == WindowState::Open && rayValid_[i]
+            pointer.hit = windowAllowed && !ui_.compactInterface &&
+                                  ui_.windowState == WindowState::Open && rayValid_[i]
                               ? intersectPanel(rayOrigin_[i], rayDirection_[i], panel_)
                               : Hit{};
             pointer.onPanel = pointer.hit.valid;
-            if ((pointerDrag && grip < .65f) || !pointer.hit.valid)
+            if ((pointerDrag && grip < .65f) || (!pointer.hit.valid && !ui_.compactInterface) ||
+                (ui_.compactInterface && pointerDrag))
                 pointer.hit = pointerHit(i, pointerDrag);
             pointer.pointerDrag = pointerDrag;
-            pointer.grip = grip;
+            pointer.grip = ui_.compactInterface ? 0 : grip;
             pointer.stick = axes;
             pointer.deltaSeconds = inputDelta;
             if (windowAllowed && pointer.valid && pointer.onPanel)

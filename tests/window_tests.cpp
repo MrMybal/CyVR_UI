@@ -37,6 +37,27 @@ void grab(WindowMotion &motion, WindowPointer &input, PanelGeometry &panel,
 int main() {
     try {
         WindowOptions options;
+        {
+            // Compact applications have no grabbable surface. An explicit trigger handle
+            // becomes a target only after capture, and must still start on that first press.
+            auto panel = placePanel(viewer, 1.35f, 1);
+            WindowMotion motion;
+            auto input = point(panel);
+            const auto handleHit = input.hit;
+            input.hit = {};
+            input.onPanel = false;
+            REQUIRE(!motion.update(0, input, panel, viewer, true, options).consumed);
+            input.pointerDrag = true;
+            input.hit = handleHit;
+            auto start = motion.update(0, input, panel, viewer, true, options);
+            REQUIRE(start.started && start.pointerDrag && !start.resizing);
+            const auto before = panel.pose.position;
+            input.origin.x += .2f;
+            REQUIRE(motion.update(0, input, panel, viewer, true, options).changed);
+            REQUIRE(panel.pose.position.x > before.x + .1f);
+            input.pointerDrag = false;
+            REQUIRE(motion.update(0, input, panel, viewer, true, options).ended);
+        }
         REQUIRE(Settings{}.follow == FollowMode::FaceViewer && Settings{}.minimalDock);
         {
             HandJoints joints{};
