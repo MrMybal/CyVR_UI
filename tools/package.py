@@ -13,7 +13,7 @@ with zipfile.ZipFile(dist / "CyVR_UI-Windows.zip", "w", zipfile.ZIP_DEFLATED) as
         if path.is_file() and allowed and relative.parts[:2] != ("assets", "branding") and path.name not in {"preferences.txt", "diagnostic.json"}:
             out.write(path, relative)
 
-files = {"CMakeLists.txt", "README.md", "LICENSE", "THIRD_PARTY.md", "build.ps1", ".gitignore", ".gitattributes", ".clang-format"}
+files = {"CMakeLists.txt", "README.md", "README.fr.md", "VERSION.md", "VERSION.fr.md", "LICENSE", "THIRD_PARTY.md", "build.ps1", ".gitignore", ".gitattributes", ".clang-format"}
 folders = {"include", "src", "shaders", "assets", "android", "tests", "tools", "docs", "third_party", "design"}
 with zipfile.ZipFile(dist / "CyVR_UI-Source.zip", "w", zipfile.ZIP_DEFLATED) as out:
     for path in sorted(root.rglob("*")):
